@@ -1,0 +1,22 @@
+[general]
+name=GeoCongo AI
+description=GeoCongo AI integration with QGIS — Gundua Engine API for automated geospatial and geological analysis with dynamic BBOX selection, background execution, and 3D geological tools.
+version=0.2.0
+qgisMinimumVersion=3.10
+author=GeoCongo AI Team
+email=contact@geocongoai.com
+about=GeoCongo AI is a QGIS plugin that connects to the Gundua Engine API for advanced geospatial analysis over the Democratic Republic of Congo. Features include: automated satellite image analysis (greenfield, illegal mining detection, landcover, landslide, lineaments), dynamic bounding box selection on the map canvas, background task execution, and 3D drillhole visualization with DBSCAN clustering.
+icon=icon.png
+category=Analysis
+experimental=False
+deprecated=False
+
+; --- Champs requis pour le dépôt officiel QGIS ---
+homepage=https://geocongoai.com
+tracker=https://github.com/Ger-Cub/geocongoai-qgis/issues
+repository=https://github.com/Ger-Cub/geocongoai-qgis
+tags=geology, remote sensing, satellite, Congo, DRC, mining, landcover, AI, analysis, Gundua
+hasProcessingProvider=no
+changelog=
+    0.2.0 - Added Gundua Engine API integration, background tasks, 3D drillhole visualization
+    0.1.0 - Initial release
