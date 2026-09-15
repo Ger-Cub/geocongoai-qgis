@@ -9,7 +9,7 @@ Le plugin ajoute un panneau latéral et des boîtes de dialogue dédiées pour t
 - `Mtumishi` : assistant QGIS pour dialoguer avec le plugin, exécuter des actions dans QGIS et mobiliser les moteurs GeoCongo AI.
 - `Pekua` : recherche documentaire RAG sur des rapports, thèses, cartes et publications géoscientifiques.
 - `Gundua` : analyses de télédétection et workflows Greenfield sur l'emprise courante de la carte.
-- `Chimbua` : analyse de forages, géochimie et clustering DBSCAN avec export 3D HTML.
+- `Chimbua` : analyse de forages, clustering 3D, estimation de ressources et exports de rapports.
 
 ## Fonctionnalités principales
 
@@ -19,8 +19,11 @@ Le plugin ajoute un panneau latéral et des boîtes de dialogue dédiées pour t
 - Bouton `Réparer` pour tenter l'installation ou la mise à jour automatique des dépendances nécessaires à Mtumishi.
 - Recherche `Pekua` avec synthèse RAG, sources citées et recherche documentaire filtrée par domaine et province.
 - Analyse `Gundua` avec BBOX dynamique, exécution asynchrone via `QgsTask` et chargement automatique des couches vectorielles et raster.
-- Analyse `Chimbua` avec sélection native des couches QGIS, clustering DBSCAN et export d'une vue 3D HTML.
-- Outils QGIS utilisables par Mtumishi : liste de couches, zoom, suppression de couche, symbologie raster, scripts PyQGIS et autres actions de cartographie.
+- Analyse `Chimbua` avec sélection native des couches QGIS, préparation des jeux de forages, clustering DBSCAN, vue 3D HTML et rechargement des résultats 3D dans QGIS.
+- Estimation de ressources pilotable depuis Mtumishi avec validation métier des champs, interpolation `IDW` ou `Ordinary Kriging`, classification des blocs et chargement d'une couche ressources dans QGIS.
+- Symbologie automatique des catégories de ressources dans QGIS (`Mesuré`, `Indiqué`, `Inféré`, `Non Économique`).
+- Export automatique du rapport de ressources en `HTML` et `JSON`.
+- Outils QGIS utilisables par Mtumishi : liste de couches, zoom, suppression de couche, symbologie raster, scripts PyQGIS, préparation de forages, pipeline Chimbua 3D et estimation de ressources.
 
 ## Installation
 
@@ -78,6 +81,10 @@ Exemples de demandes :
 - `Applique une symbologie sur la couche active`
 - `Supprime la couche LC09_L1TP_...`
 - `Analyse l'emprise courante pour le cuivre`
+- `Prépare les couches assay_BABBITT, collar_BABBITT et survey_BABBITT pour Chimbua`
+- `Lance un pipeline Chimbua 3D sur assay_BABBITT`
+- `Estime les ressources sur assay_BABBITT avec cutoff 0.5 densité 2.7`
+- `Exporte le rapport ressources`
 
 Le chat affiche :
 
@@ -118,6 +125,14 @@ La boîte de dialogue `Chimbua` permet de :
 - créer une couche résultat dans QGIS,
 - exporter une visualisation 3D HTML.
 
+Depuis `Mtumishi`, le moteur Chimbua permet aussi de :
+
+- préparer un dataset de forages à partir des couches `assay`, `collar` et `survey`,
+- lancer un pipeline 3D réel avec rechargement des points 3D, collars et volumes,
+- estimer des ressources sur un modèle de blocs,
+- appliquer une symbologie automatique par catégorie de ressources,
+- exporter un rapport `HTML` et `JSON`.
+
 ## Architecture rapide
 
 ```text
@@ -128,6 +143,7 @@ gui/gundua_dialog.py            Analyses Gundua
 gui/drillhole_dialog.py         Analyse Chimbua / DBSCAN
 gui/settings_dialog.py          Clés API, diagnostic et réparation
 utils/mtumishi_orchestrator.py  Intégration Mtumishi + outils QGIS locaux
+utils/drillhole_adapter.py      Préparation réutilisable des données de forage
 tasks/gundua_task.py            Exécution asynchrone Gundua
 ```
 
@@ -157,13 +173,17 @@ Cette version aligne le plugin avec le SDK GeoCongo AI `0.4.3` et inclut notamme
 - le streaming des réponses,
 - le suivi des appels d'outils dans le chat,
 - la compatibilité du dialogue Pekua avec les signatures actuelles du SDK,
-- le diagnostic et la réparation guidée de l'environnement conversationnel dans QGIS.
+- le diagnostic et la réparation guidée de l'environnement conversationnel dans QGIS,
+- la préparation des couches de forage pour Chimbua,
+- le pipeline Chimbua 3D lancé depuis Mtumishi,
+- l'estimation de ressources avec classification et exports `HTML` / `JSON`.
 
 ## Limites connues
 
 - Le comportement exact des moteurs dépend des clés API, du réseau et de la disponibilité des services distants.
 - Certaines actions de Mtumishi sur les couches peuvent nécessiter une meilleure désambiguïsation si plusieurs couches portent des noms proches.
 - La réparation automatique dépend des droits d'installation Python disponibles dans l'environnement QGIS local.
+- L'estimation de ressources actuelle repose sur les briques disponibles du SDK `0.4.3` et constitue une première intégration orientée workflow, pas encore un module de reporting minier complet.
 
 ## Licence
 

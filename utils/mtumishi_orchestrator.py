@@ -5,14 +5,18 @@ Mtumishi orchestrator backed by the official GeoCongo AI SDK.
 import contextlib
 import io
 import importlib.metadata as importlib_metadata
+import json
 import os
 import queue
 import re
 import subprocess
 import sys
 import threading
+from datetime import datetime
 
-from qgis.PyQt.QtCore import QCoreApplication, QObject, QSettings, Qt, QThread, pyqtSignal, pyqtSlot
+from qgis.PyQt.QtCore import QCoreApplication, QObject, QSettings, Qt, QThread, QVariant, pyqtSignal, pyqtSlot
+
+from .drillhole_adapter import build_resource_sample_points, prepare_drillhole_dataset, validate_resource_estimation_inputs
 
 
 class _MainThreadInvoker(QObject):
@@ -77,6 +81,11 @@ class MtumishiOrchestrator:
         self.last_init_error = ""
         self.last_run_result = None
         self.last_events = []
+        self.last_drillhole_preparation = None
+        self.last_chimbua_result = None
+        self.last_chimbua_output_path = None
+        self.last_resource_estimate = None
+        self.last_resource_report_paths = None
         self.antigravity_diagnostic = None
         self._settings_signature = None
 
@@ -121,6 +130,11 @@ class MtumishiOrchestrator:
         self.active_model_name = None
         self.last_run_result = None
         self.last_events = []
+        self.last_drillhole_preparation = None
+        self.last_chimbua_result = None
+        self.last_chimbua_output_path = None
+        self.last_resource_estimate = None
+        self.last_resource_report_paths = None
         self.antigravity_diagnostic = self._probe_antigravity_environment()
         self.last_init_error = ""
 
@@ -426,6 +440,128 @@ class MtumishiOrchestrator:
             handler=self._remove_layer,
         ))
 
+        self.mtumishi.register_tool(GeoTool(
+            name="qgis_prepare_drillhole_dataset",
+            description=(
+                "Prépare un jeu de données de forage depuis les couches QGIS Desktop pour une "
+                "analyse Chimbua ou une visualisation 3D. Détecte les couches assay, collar et "
+                "survey, les champs de teneur et les profondeurs, puis résume les données prêtes "
+                "pour le moteur de forages."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "assay_layer_name": {
+                        "type": "string",
+                        "description": "Nom de la couche assay / intervalles / forages à analyser."
+                    },
+                    "collar_layer_name": {
+                        "type": "string",
+                        "description": "Nom de la couche de colliers si connue."
+                    },
+                    "survey_layer_name": {
+                        "type": "string",
+                        "description": "Nom de la couche survey / déviation si connue."
+                    },
+                    "grade_field": {
+                        "type": "string",
+                        "description": "Champ de teneur à analyser, par exemple Cu, Au ou cu_pct."
+                    },
+                    "cutoff": {
+                        "type": "number",
+                        "description": "Seuil minimum de teneur à retenir.",
+                        "default": 0.0
+                    }
+                }
+            },
+            handler=self._prepare_drillhole_dataset,
+        ))
+
+        self.mtumishi.register_tool(GeoTool(
+            name="qgis_run_chimbua_pipeline",
+            description=(
+                "Lance un pipeline Chimbua 3D réel à partir des couches de forage QGIS, "
+                "génère la visualisation HTML 3D, puis recharge les résultats utiles dans QGIS."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "assay_layer_name": {"type": "string"},
+                    "collar_layer_name": {"type": "string"},
+                    "survey_layer_name": {"type": "string"},
+                    "grade_field": {"type": "string"},
+                    "cutoff": {"type": "number", "default": 0.0},
+                    "eps": {"type": "number", "default": 25.0},
+                    "min_samples": {"type": "integer", "default": 3},
+                    "output_html_path": {"type": "string"},
+                    "open_after_export": {"type": "boolean", "default": True},
+                }
+            },
+            handler=self._run_chimbua_pipeline,
+        ))
+
+        self.mtumishi.register_tool(GeoTool(
+            name="qgis_open_3d_result",
+            description=(
+                "Ouvre la dernière visualisation 3D Chimbua générée, ou un chemin HTML 3D fourni."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "html_path": {
+                        "type": "string",
+                        "description": "Chemin HTML à ouvrir. Si absent, utilise le dernier résultat Chimbua."
+                    }
+                }
+            },
+            handler=self._open_3d_result,
+        ))
+
+        self.mtumishi.register_tool(GeoTool(
+            name="qgis_estimate_resources",
+            description=(
+                "Estime des ressources à partir des couches de forage QGIS en construisant un "
+                "modèle de blocs 3D, en interpolant les teneurs, puis en classifiant les blocs "
+                "par catégorie de ressources avec cutoff économique."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "assay_layer_name": {"type": "string"},
+                    "collar_layer_name": {"type": "string"},
+                    "survey_layer_name": {"type": "string"},
+                    "grade_field": {"type": "string"},
+                    "cutoff": {"type": "number", "default": 0.5},
+                    "density": {"type": "number", "default": 2.7},
+                    "method": {"type": "string", "default": "idw"},
+                    "block_size_x": {"type": "number", "default": 25.0},
+                    "block_size_y": {"type": "number", "default": 25.0},
+                    "block_size_z": {"type": "number", "default": 10.0},
+                    "search_range": {"type": "number", "default": 100.0},
+                    "min_samples": {"type": "integer", "default": 3},
+                    "max_samples": {"type": "integer", "default": 12},
+                }
+            },
+            handler=self._estimate_resources,
+        ))
+
+        self.mtumishi.register_tool(GeoTool(
+            name="qgis_export_resource_report",
+            description=(
+                "Exporte le dernier rapport d'estimation de ressources en HTML et JSON."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "base_path": {
+                        "type": "string",
+                        "description": "Chemin de base sans extension pour les fichiers de rapport."
+                    }
+                }
+            },
+            handler=self._export_resource_report,
+        ))
+
     def _resolve_layer(self, layer_name: str = None, raster_only: bool = False):
         if not self.iface:
             raise ValueError("Interface QGIS indisponible.")
@@ -592,10 +728,804 @@ class MtumishiOrchestrator:
             "layer_id": removed_id,
         }
 
+    def _resolve_drillhole_layer_name(self, layer_name: str = None, preferred_keywords=None, allow_fallback: bool = True):
+        if not self.iface:
+            raise ValueError("Interface QGIS indisponible.")
+
+        from qgis.core import QgsMapLayerType, QgsProject
+
+        preferred_keywords = tuple(keyword.lower() for keyword in (preferred_keywords or ()))
+        layers = [
+            layer for layer in QgsProject.instance().mapLayers().values()
+            if layer.type() == QgsMapLayerType.VectorLayer
+        ]
+
+        if layer_name:
+            requested = layer_name.strip().lower()
+            for layer in layers:
+                if layer.name().strip().lower() == requested:
+                    return layer
+            for layer in layers:
+                if requested in layer.name().strip().lower():
+                    return layer
+
+        if preferred_keywords:
+            for layer in layers:
+                lowered = layer.name().lower()
+                if any(keyword in lowered for keyword in preferred_keywords):
+                    return layer
+
+        if not allow_fallback:
+            return None
+
+        active_layer = self.iface.activeLayer() if hasattr(self.iface, "activeLayer") else None
+        if active_layer and active_layer in layers:
+            return active_layer
+
+        return layers[0] if layers else None
+
+    def _prepare_drillhole_dataset(
+        self,
+        assay_layer_name: str = None,
+        collar_layer_name: str = None,
+        survey_layer_name: str = None,
+        grade_field: str = None,
+        cutoff: float = 0.0,
+    ):
+        return self._run_in_qgis_main_thread(
+            self._prepare_drillhole_dataset_impl,
+            assay_layer_name,
+            collar_layer_name,
+            survey_layer_name,
+            grade_field,
+            cutoff,
+        )
+
+    def _prepare_drillhole_dataset_impl(
+        self,
+        assay_layer_name: str = None,
+        collar_layer_name: str = None,
+        survey_layer_name: str = None,
+        grade_field: str = None,
+        cutoff: float = 0.0,
+    ):
+        assay_layer = self._resolve_drillhole_layer_name(
+            assay_layer_name,
+            preferred_keywords=("assay", "interval", "forage", "drill", "sample"),
+            allow_fallback=True,
+        )
+        collar_layer = self._resolve_drillhole_layer_name(
+            collar_layer_name,
+            preferred_keywords=("collar", "head"),
+            allow_fallback=False,
+        )
+        survey_layer = self._resolve_drillhole_layer_name(
+            survey_layer_name,
+            preferred_keywords=("survey", "deviation", "devia"),
+            allow_fallback=False,
+        )
+
+        if assay_layer is None:
+            raise ValueError("Aucune couche assay/forage exploitable n'a été trouvée dans QGIS.")
+
+        prepared = prepare_drillhole_dataset(
+            assay_layer=assay_layer,
+            grade_field=grade_field or "",
+            cutoff=float(cutoff or 0.0),
+            collar_layer=collar_layer,
+            survey_layer=survey_layer,
+            project_or_layers=None,
+        )
+
+        schema = dict(prepared.get("schema") or {})
+        preview_records = []
+        for record in prepared.get("records", [])[:5]:
+            preview_records.append({
+                "hole_id": record.get("hole_id"),
+                "grade_value": record.get("grade_value"),
+                "mid_depth": record.get("mid_depth"),
+                "x": record["point"].x() if record.get("point") else None,
+                "y": record["point"].y() if record.get("point") else None,
+                "z": record.get("z_value"),
+            })
+
+        result = {
+            "success": True,
+            "message": "Jeu de données de forage préparé pour Chimbua.",
+            "layers": {
+                "assay": assay_layer.name(),
+                "collar": collar_layer.name() if collar_layer else None,
+                "survey": survey_layer.name() if survey_layer else None,
+            },
+            "schema": schema,
+            "stats": dict(prepared.get("stats") or {}),
+            "grade_field": prepared.get("grade_field"),
+            "cutoff": float(cutoff or 0.0),
+            "records_prepared": len(prepared.get("records", [])),
+            "preview": preview_records,
+        }
+        self.last_drillhole_preparation = result
+        return result
+
+    def _default_chimbua_output_path(self, assay_layer_name: str = None, grade_field: str = None):
+        safe_assay = re.sub(r"[^A-Za-z0-9_-]+", "_", (assay_layer_name or "forages")).strip("_") or "forages"
+        safe_grade = re.sub(r"[^A-Za-z0-9_-]+", "_", (grade_field or "grade")).strip("_") or "grade"
+        downloads_dir = os.path.expanduser("~/Downloads")
+        base_dir = downloads_dir if os.path.isdir(downloads_dir) else "/tmp"
+        return os.path.join(base_dir, f"geocongoai_chimbua_{safe_assay}_{safe_grade}.html")
+
+    def _default_resource_report_base_path(self, assay_layer_name: str = None, grade_field: str = None):
+        safe_assay = re.sub(r"[^A-Za-z0-9_-]+", "_", (assay_layer_name or "forages")).strip("_") or "forages"
+        safe_grade = re.sub(r"[^A-Za-z0-9_-]+", "_", (grade_field or "grade")).strip("_") or "grade"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        downloads_dir = os.path.expanduser("~/Downloads")
+        base_dir = downloads_dir if os.path.isdir(downloads_dir) else "/tmp"
+        return os.path.join(base_dir, f"geocongoai_resources_{safe_assay}_{safe_grade}_{timestamp}")
+
+    def _run_chimbua_pipeline(
+        self,
+        assay_layer_name: str = None,
+        collar_layer_name: str = None,
+        survey_layer_name: str = None,
+        grade_field: str = None,
+        cutoff: float = 0.0,
+        eps: float = 25.0,
+        min_samples: int = 3,
+        output_html_path: str = None,
+        open_after_export: bool = True,
+    ):
+        prep_result = self._prepare_drillhole_dataset(
+            assay_layer_name=assay_layer_name,
+            collar_layer_name=collar_layer_name,
+            survey_layer_name=survey_layer_name,
+            grade_field=grade_field,
+            cutoff=cutoff,
+        )
+        return self._run_chimbua_pipeline_from_preparation(
+            prep_result=prep_result,
+            eps=eps,
+            min_samples=min_samples,
+            output_html_path=output_html_path,
+            open_after_export=open_after_export,
+        )
+
+    def _run_chimbua_pipeline_from_preparation(
+        self,
+        prep_result: dict,
+        eps: float = 25.0,
+        min_samples: int = 3,
+        output_html_path: str = None,
+        open_after_export: bool = True,
+    ):
+        from geocongoai.datasets import DrillholeDataset
+
+        if not prep_result or not prep_result.get("success"):
+            raise ValueError("Aucune préparation de forage valide n'est disponible pour Chimbua.")
+
+        assay_layer_name = (prep_result.get("layers") or {}).get("assay")
+        grade_field = prep_result.get("grade_field")
+        output_html_path = output_html_path or self._default_chimbua_output_path(assay_layer_name, grade_field)
+
+        prepared = prepare_drillhole_dataset(
+            assay_layer=self._resolve_drillhole_layer_name(assay_layer_name, allow_fallback=True),
+            grade_field=grade_field,
+            cutoff=float(prep_result.get("cutoff") or 0.0),
+            collar_layer=self._resolve_drillhole_layer_name((prep_result.get("layers") or {}).get("collar"), preferred_keywords=("collar", "head"), allow_fallback=False),
+            survey_layer=self._resolve_drillhole_layer_name((prep_result.get("layers") or {}).get("survey"), preferred_keywords=("survey", "deviation", "devia"), allow_fallback=False),
+            project_or_layers=None,
+        )
+
+        sdk_inputs = prepared.get("sdk_inputs") or {}
+        collars = sdk_inputs.get("collars") or []
+        assays = sdk_inputs.get("assays") or []
+        survey = sdk_inputs.get("survey") or []
+        if not collars:
+            raise ValueError("Chimbua requiert au moins une couche de colliers ou des colliers dérivables.")
+        if not assays:
+            raise ValueError("Aucune analyse géochimique exploitable n'a été transmise à Chimbua.")
+
+        assay_layer = prepared.get("assay_layer")
+        crs_authid = assay_layer.crs().authid() if assay_layer and assay_layer.crs().isValid() else "EPSG:4326"
+        title = f"GeoCongo AI — Chimbua 3D ({assay_layer_name or 'forages'})"
+
+        dataset = DrillholeDataset(collars=collars, assays=assays, survey=survey or None)
+        geo_result = dataset.analyze(
+            method="dbscan",
+            element=grade_field,
+            grade_threshold=float(prep_result.get("cutoff") or 0.0),
+            eps=float(eps),
+            min_samples=int(min_samples),
+            title=title,
+            crs=crs_authid,
+        )
+
+        html_code = None
+        try:
+            html_code = geo_result.to_html(output_path=output_html_path)
+        except Exception:
+            output_html_path = None
+
+        load_result = self._load_chimbua_results(
+            geo_result=geo_result,
+            assay_layer=assay_layer,
+            grade_field=grade_field,
+        )
+
+        open_result = None
+        if open_after_export and output_html_path:
+            open_result = self._open_3d_result(output_html_path)
+
+        result = {
+            "success": True,
+            "status": "success",
+            "message": "Pipeline Chimbua exécuté avec succès.",
+            "layers": prep_result.get("layers") or {},
+            "grade_field": grade_field,
+            "cutoff": float(prep_result.get("cutoff") or 0.0),
+            "eps": float(eps),
+            "min_samples": int(min_samples),
+            "total_intervals": len(getattr(geo_result, "points", []) or []),
+            "clustering_summary": dict(getattr(geo_result, "metadata", {}) or {}),
+            "statistics": dict(getattr(geo_result, "statistics", {}) or {}),
+            "hulls_count": len(getattr(geo_result, "geometries", []) or []),
+            "output_html_path": output_html_path,
+            "html_generated": bool(html_code and output_html_path),
+            "loaded_layers": load_result,
+            "open_result": open_result,
+        }
+        self.last_chimbua_result = result
+        self.last_chimbua_output_path = output_html_path
+        return result
+
+    def _load_chimbua_results(self, geo_result, assay_layer=None, grade_field: str = None):
+        return self._run_in_qgis_main_thread(
+            self._load_chimbua_results_impl,
+            geo_result,
+            assay_layer,
+            grade_field,
+        )
+
+    def _load_chimbua_results_impl(self, geo_result, assay_layer=None, grade_field: str = None):
+        from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsPoint, QgsProject, QgsVectorLayer
+
+        crs_authid = assay_layer.crs().authid() if assay_layer and assay_layer.crs().isValid() else "EPSG:4326"
+        point_layer = QgsVectorLayer(f"PointZ?crs={crs_authid}", f"GeoCongo AI - Chimbua 3D ({grade_field or 'grade'})", "memory")
+        point_provider = point_layer.dataProvider()
+        point_provider.addAttributes([
+            QgsField("hole_id", QVariant.String),
+            QgsField("from_m", QVariant.Double),
+            QgsField("to_m", QVariant.Double),
+            QgsField("grade", QVariant.Double),
+            QgsField("cluster_id", QVariant.Int),
+            QgsField("z_elev", QVariant.Double),
+        ])
+        point_layer.updateFields()
+
+        point_features = []
+        for point in getattr(geo_result, "points", []) or []:
+            feature = QgsFeature(point_layer.fields())
+            feature.setGeometry(QgsGeometry(QgsPoint(float(point["x"]), float(point["y"]), float(point["z"]))))
+            feature.setAttributes([
+                str(point.get("hole_id", "")),
+                float(point.get("from_m", 0.0) or 0.0),
+                float(point.get("to_m", 0.0) or 0.0),
+                float(point.get(grade_field, point.get("value", 0.0)) or 0.0),
+                int(point.get("cluster", -1) or -1),
+                float(point.get("z", 0.0) or 0.0),
+            ])
+            point_features.append(feature)
+        point_provider.addFeatures(point_features)
+        point_layer.updateExtents()
+        QgsProject.instance().addMapLayer(point_layer)
+        if hasattr(self.iface, "setActiveLayer"):
+            self.iface.setActiveLayer(point_layer)
+
+        collars_layer_name = None
+        collar_features = []
+        collars = getattr(geo_result, "collars", []) or []
+        if collars:
+            collars_layer = QgsVectorLayer(f"PointZ?crs={crs_authid}", "GeoCongo AI - Chimbua Collars", "memory")
+            collars_provider = collars_layer.dataProvider()
+            collars_provider.addAttributes([
+                QgsField("hole_id", QVariant.String),
+                QgsField("z", QVariant.Double),
+                QgsField("dip", QVariant.Double),
+                QgsField("azimuth", QVariant.Double),
+            ])
+            collars_layer.updateFields()
+            for collar in collars:
+                feature = QgsFeature(collars_layer.fields())
+                feature.setGeometry(QgsGeometry(QgsPoint(float(collar["x"]), float(collar["y"]), float(collar["z"]))))
+                feature.setAttributes([
+                    str(collar.get("hole_id", "")),
+                    float(collar.get("z", 0.0) or 0.0),
+                    float(collar.get("dip", -90.0) or -90.0),
+                    float(collar.get("azimuth", 0.0) or 0.0),
+                ])
+                collar_features.append(feature)
+            collars_provider.addFeatures(collar_features)
+            collars_layer.updateExtents()
+            QgsProject.instance().addMapLayer(collars_layer)
+            collars_layer_name = collars_layer.name()
+
+        hull_vertices_layer_name = None
+        hull_vertex_features = []
+        hulls = getattr(geo_result, "geometries", []) or []
+        if hulls:
+            hull_vertices_layer = QgsVectorLayer(f"PointZ?crs={crs_authid}", "GeoCongo AI - Chimbua Hull Vertices", "memory")
+            hull_vertices_provider = hull_vertices_layer.dataProvider()
+            hull_vertices_provider.addAttributes([
+                QgsField("cluster_id", QVariant.Int),
+                QgsField("vertex_id", QVariant.Int),
+                QgsField("volume_m3", QVariant.Double),
+                QgsField("area_m2", QVariant.Double),
+            ])
+            hull_vertices_layer.updateFields()
+            for hull in hulls:
+                vertices = hull.get("vertices") or {}
+                x_values = vertices.get("x") or []
+                y_values = vertices.get("y") or []
+                z_values = vertices.get("z") or []
+                cluster_id = int(hull.get("cluster_id", -1) or -1)
+                volume_m3 = float(hull.get("volume_m3", 0.0) or 0.0)
+                area_m2 = float(hull.get("area_m2", 0.0) or 0.0)
+                for vertex_id, (x_value, y_value, z_value) in enumerate(zip(x_values, y_values, z_values), start=1):
+                    feature = QgsFeature(hull_vertices_layer.fields())
+                    feature.setGeometry(QgsGeometry(QgsPoint(float(x_value), float(y_value), float(z_value))))
+                    feature.setAttributes([
+                        cluster_id,
+                        vertex_id,
+                        volume_m3,
+                        area_m2,
+                    ])
+                    hull_vertex_features.append(feature)
+            if hull_vertex_features:
+                hull_vertices_provider.addFeatures(hull_vertex_features)
+                hull_vertices_layer.updateExtents()
+                QgsProject.instance().addMapLayer(hull_vertices_layer)
+                hull_vertices_layer_name = hull_vertices_layer.name()
+
+        if hasattr(self.iface, "mapCanvas") and point_features:
+            self.iface.mapCanvas().setExtent(point_layer.extent())
+        if hasattr(self.iface, "mapCanvas"):
+            self.iface.mapCanvas().refresh()
+
+        return {
+            "point_layer": point_layer.name(),
+            "point_count": len(point_features),
+            "collar_layer": collars_layer_name,
+            "collar_count": len(collar_features),
+            "hull_vertices_layer": hull_vertices_layer_name,
+            "hull_vertex_count": len(hull_vertex_features),
+        }
+
+    def _open_3d_result(self, html_path: str = None):
+        return self._run_in_qgis_main_thread(self._open_3d_result_impl, html_path)
+
+    def _open_3d_result_impl(self, html_path: str = None):
+        from qgis.PyQt.QtCore import QUrl
+        from qgis.PyQt.QtGui import QDesktopServices
+
+        target_path = html_path or self.last_chimbua_output_path
+        if not target_path:
+            return {
+                "success": False,
+                "message": "Aucune visualisation 3D Chimbua n'est encore disponible.",
+                "html_path": None,
+            }
+
+        if not os.path.exists(target_path):
+            return {
+                "success": False,
+                "message": f"Le fichier 3D est introuvable : {target_path}",
+                "html_path": target_path,
+            }
+
+        opened = QDesktopServices.openUrl(QUrl.fromLocalFile(target_path))
+        return {
+            "success": bool(opened),
+            "message": "Visualisation 3D ouverte." if opened else "Impossible d'ouvrir automatiquement la visualisation 3D.",
+            "html_path": target_path,
+        }
+
+    def _estimate_resources(
+        self,
+        assay_layer_name: str = None,
+        collar_layer_name: str = None,
+        survey_layer_name: str = None,
+        grade_field: str = None,
+        cutoff: float = 0.5,
+        density: float = 2.7,
+        method: str = "idw",
+        block_size_x: float = 25.0,
+        block_size_y: float = 25.0,
+        block_size_z: float = 10.0,
+        search_range: float = 100.0,
+        min_samples: int = 3,
+        max_samples: int = 12,
+    ):
+        prep_result = self._prepare_drillhole_dataset(
+            assay_layer_name=assay_layer_name,
+            collar_layer_name=collar_layer_name,
+            survey_layer_name=survey_layer_name,
+            grade_field=grade_field,
+            cutoff=0.0,
+        )
+        return self._estimate_resources_from_preparation(
+            prep_result=prep_result,
+            cutoff=cutoff,
+            density=density,
+            method=method,
+            block_size=(block_size_x, block_size_y, block_size_z),
+            search_range=search_range,
+            min_samples=min_samples,
+            max_samples=max_samples,
+        )
+
+    def _estimate_resources_from_preparation(
+        self,
+        prep_result: dict,
+        cutoff: float = 0.5,
+        density: float = 2.7,
+        method: str = "idw",
+        block_size=(25.0, 25.0, 10.0),
+        search_range: float = 100.0,
+        min_samples: int = 3,
+        max_samples: int = 12,
+    ):
+        from math import ceil
+
+        from geocongoai.chimbua_engine.blockmodel import BlockModel3D
+        from geocongoai.chimbua_engine.estimation import IDWEstimator, OrdinaryKriging
+        from geocongoai.chimbua_engine.resources import ResourceEstimator
+
+        if not prep_result or not prep_result.get("success"):
+            raise ValueError("Aucune préparation de forage valide n'est disponible pour l'estimation de ressources.")
+
+        layers = prep_result.get("layers") or {}
+        grade_field = prep_result.get("grade_field")
+        assay_layer = self._resolve_drillhole_layer_name(layers.get("assay"), allow_fallback=True)
+        collar_layer = self._resolve_drillhole_layer_name(
+            layers.get("collar"),
+            preferred_keywords=("collar", "head"),
+            allow_fallback=False,
+        )
+        survey_layer = self._resolve_drillhole_layer_name(
+            layers.get("survey"),
+            preferred_keywords=("survey", "deviation", "devia"),
+            allow_fallback=False,
+        )
+
+        prepared = prepare_drillhole_dataset(
+            assay_layer=assay_layer,
+            grade_field=grade_field,
+            cutoff=0.0,
+            collar_layer=collar_layer,
+            survey_layer=survey_layer,
+            project_or_layers=None,
+        )
+
+        validation = validate_resource_estimation_inputs(
+            prepared,
+            cutoff_grade=float(cutoff),
+            density=float(density),
+            block_size=tuple(float(v) for v in block_size),
+            search_range=float(search_range),
+            min_samples=int(min_samples),
+            method=method,
+        )
+        if not validation.get("ok"):
+            raise ValueError(" ".join(validation.get("errors") or ["Validation métier de ressources échouée."]))
+
+        sample_points = validation.get("sample_points") or build_resource_sample_points(prepared)
+        extent = validation.get("extent") or {}
+        dx, dy, dz = [float(v) for v in block_size]
+        width_x = max(dx, float(extent.get("xmax", 0.0)) - float(extent.get("xmin", 0.0)))
+        width_y = max(dy, float(extent.get("ymax", 0.0)) - float(extent.get("ymin", 0.0)))
+        width_z = max(dz, float(extent.get("zmax", 0.0)) - float(extent.get("zmin", 0.0)))
+        nx = max(1, int(ceil(width_x / dx)))
+        ny = max(1, int(ceil(width_y / dy)))
+        nz = max(1, int(ceil(width_z / dz)))
+
+        block_model = BlockModel3D(
+            origin=(float(extent["xmin"]), float(extent["ymin"]), float(extent["zmin"])),
+            block_size=(dx, dy, dz),
+            count=(nx, ny, nz),
+        )
+        blocks = block_model.build_grid()
+        selected_method = (method or "idw").strip().lower()
+        kriging = OrdinaryKriging() if selected_method == "ordinary_kriging" else None
+
+        for block in blocks:
+            target_pt = {"x": block["x"], "y": block["y"], "z": block["z"]}
+            if selected_method == "ordinary_kriging":
+                grade_value, variance = kriging.estimate(
+                    sample_points,
+                    target_pt,
+                    max_range=float(search_range),
+                    max_samples=max(1, int(max_samples)),
+                )
+            else:
+                grade_value, variance = IDWEstimator.estimate(
+                    sample_points,
+                    target_pt,
+                    power=2.0,
+                    max_range=float(search_range),
+                    min_samples=max(1, int(min_samples)),
+                )
+            block["estimated_grade"] = float(grade_value or 0.0)
+            block["variance"] = float(variance or 0.0)
+
+        report = ResourceEstimator.classify_and_report(
+            blocks,
+            density=float(density),
+            cutoff_grade=float(cutoff),
+        )
+        for block in blocks:
+            block["density"] = float(density)
+        crs_authid = assay_layer.crs().authid() if assay_layer and assay_layer.crs().isValid() else "EPSG:4326"
+        layer_result = self._load_resource_blocks(blocks, crs_authid, grade_field)
+        report_export = self._export_resource_report_from_payload(
+            payload={
+                "layers": layers,
+                "grade_field": grade_field,
+                "method": selected_method,
+                "cutoff": float(cutoff),
+                "density": float(density),
+                "block_size": {"x": dx, "y": dy, "z": dz},
+                "search_range": float(search_range),
+                "min_samples": int(min_samples),
+                "max_samples": int(max_samples),
+                "block_count": len(blocks),
+                "sample_count": validation.get("sample_count", len(sample_points)),
+                "unique_hole_count": validation.get("unique_hole_count", 0),
+                "warnings": validation.get("warnings") or [],
+                "report": report,
+                "loaded_layers": layer_result,
+            }
+        )
+
+        result = {
+            "success": True,
+            "message": "Estimation de ressources exécutée avec succès.",
+            "layers": layers,
+            "grade_field": grade_field,
+            "method": selected_method,
+            "cutoff": float(cutoff),
+            "density": float(density),
+            "block_size": {"x": dx, "y": dy, "z": dz},
+            "search_range": float(search_range),
+            "min_samples": int(min_samples),
+            "max_samples": int(max_samples),
+            "block_count": len(blocks),
+            "sample_count": validation.get("sample_count", len(sample_points)),
+            "unique_hole_count": validation.get("unique_hole_count", 0),
+            "warnings": validation.get("warnings") or [],
+            "report": report,
+            "loaded_layers": layer_result,
+            "report_export": report_export,
+        }
+        self.last_resource_estimate = result
+        self.last_resource_report_paths = report_export
+        return result
+
+    def _load_resource_blocks(self, blocks, crs_authid: str, grade_field: str = None):
+        return self._run_in_qgis_main_thread(self._load_resource_blocks_impl, blocks, crs_authid, grade_field)
+
+    def _load_resource_blocks_impl(self, blocks, crs_authid: str, grade_field: str = None):
+        from qgis.PyQt.QtGui import QColor
+        from qgis.core import (
+            QgsCategorizedSymbolRenderer,
+            QgsFeature,
+            QgsField,
+            QgsGeometry,
+            QgsPoint,
+            QgsProject,
+            QgsRendererCategory,
+            QgsSymbol,
+            QgsVectorLayer,
+        )
+
+        layer_name = f"GeoCongo AI - Ressources ({grade_field or 'grade'})"
+        layer = QgsVectorLayer(f"PointZ?crs={crs_authid}", layer_name, "memory")
+        provider = layer.dataProvider()
+        provider.addAttributes([
+            QgsField("ix", QVariant.Int),
+            QgsField("iy", QVariant.Int),
+            QgsField("iz", QVariant.Int),
+            QgsField("grade_est", QVariant.Double),
+            QgsField("variance", QVariant.Double),
+            QgsField("category", QVariant.String),
+            QgsField("volume_m3", QVariant.Double),
+            QgsField("tonnage_t", QVariant.Double),
+        ])
+        layer.updateFields()
+
+        features = []
+        for block in blocks:
+            feature = QgsFeature(layer.fields())
+            feature.setGeometry(QgsGeometry(QgsPoint(float(block["x"]), float(block["y"]), float(block["z"]))))
+            volume = float(block.get("volume") or 0.0)
+            density = float(block.get("density") or 0.0)
+            feature.setAttributes([
+                int(block.get("ix", 0)),
+                int(block.get("iy", 0)),
+                int(block.get("iz", 0)),
+                float(block.get("estimated_grade") or 0.0),
+                float(block.get("variance") or 0.0),
+                str(block.get("category") or "Unclassified"),
+                volume,
+                volume * density if density > 0.0 else 0.0,
+            ])
+            features.append(feature)
+
+        provider.addFeatures(features)
+        layer.updateExtents()
+
+        category_colors = {
+            "Mesuré": "#0B8F3A",
+            "Indiqué": "#E2A400",
+            "Inféré": "#D95F02",
+            "Non Économique": "#7A7A7A",
+            "Unclassified": "#4C78A8",
+        }
+        categories = []
+        for category_name, color_code in category_colors.items():
+            symbol = QgsSymbol.defaultSymbol(layer.geometryType())
+            if symbol is not None:
+                symbol.setColor(QColor(color_code))
+                symbol.setOpacity(0.9)
+                symbol.setSize(3.2)
+            categories.append(QgsRendererCategory(category_name, symbol, category_name))
+        renderer = QgsCategorizedSymbolRenderer("category", categories)
+        layer.setRenderer(renderer)
+
+        QgsProject.instance().addMapLayer(layer)
+        if hasattr(self.iface, "setActiveLayer"):
+            self.iface.setActiveLayer(layer)
+        if hasattr(self.iface, "layerTreeView"):
+            self.iface.layerTreeView().refreshLayerSymbology(layer.id())
+        if hasattr(self.iface, "mapCanvas") and features:
+            self.iface.mapCanvas().setExtent(layer.extent())
+            self.iface.mapCanvas().refresh()
+
+        return {
+            "resource_layer": layer.name(),
+            "block_count": len(features),
+        }
+
+    def _export_resource_report(self, base_path: str = None):
+        payload = self.last_resource_estimate
+        if not payload:
+            return {
+                "success": False,
+                "message": "Aucun résultat de ressources n'est disponible pour export.",
+                "html_path": None,
+                "json_path": None,
+            }
+        return self._export_resource_report_from_payload(payload, base_path=base_path)
+
+    def _export_resource_report_from_payload(self, payload: dict, base_path: str = None):
+        layers = payload.get("layers") or {}
+        grade_field = payload.get("grade_field")
+        assay_layer_name = layers.get("assay")
+        base_path = (base_path or self._default_resource_report_base_path(assay_layer_name, grade_field)).strip()
+        if base_path.lower().endswith(".json") or base_path.lower().endswith(".html"):
+            base_path = os.path.splitext(base_path)[0]
+
+        output_dir = os.path.dirname(base_path) or "."
+        os.makedirs(output_dir, exist_ok=True)
+        json_path = f"{base_path}.json"
+        html_path = f"{base_path}.html"
+
+        report_payload = {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "summary": {
+                "assay_layer": assay_layer_name,
+                "collar_layer": layers.get("collar"),
+                "survey_layer": layers.get("survey"),
+                "grade_field": grade_field,
+                "method": payload.get("method"),
+                "cutoff": payload.get("cutoff"),
+                "density": payload.get("density"),
+                "block_size": payload.get("block_size"),
+                "search_range": payload.get("search_range"),
+                "min_samples": payload.get("min_samples"),
+                "max_samples": payload.get("max_samples"),
+                "block_count": payload.get("block_count"),
+                "sample_count": payload.get("sample_count"),
+                "unique_hole_count": payload.get("unique_hole_count"),
+            },
+            "report": payload.get("report") or {},
+            "warnings": payload.get("warnings") or [],
+            "loaded_layers": payload.get("loaded_layers") or {},
+        }
+
+        with open(json_path, "w", encoding="utf-8") as handle:
+            json.dump(report_payload, handle, ensure_ascii=False, indent=2)
+
+        total = (report_payload["report"].get("total") or {})
+        category_rows = []
+        for row in report_payload["report"].get("by_category") or []:
+            category_rows.append(
+                "<tr>"
+                f"<td>{row.get('category')}</td>"
+                f"<td>{row.get('block_count', 0)}</td>"
+                f"<td>{row.get('tonnage_t', 0)}</td>"
+                f"<td>{row.get('mean_grade_pct', 0)}</td>"
+                f"<td>{row.get('metal_contained_t', 0)}</td>"
+                "</tr>"
+            )
+        warnings_html = "".join(f"<li>{warning}</li>" for warning in (report_payload.get("warnings") or [])) or "<li>Aucun avertissement.</li>"
+        category_rows_html = "".join(category_rows) or '<tr><td colspan="5">Aucune catégorie calculée.</td></tr>'
+        html = (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            "<title>GeoCongo AI - Rapport Ressources</title>"
+            "<style>"
+            "body{font-family:Arial,sans-serif;background:#f5f1e8;color:#1f2933;padding:24px;line-height:1.45;}"
+            ".card{background:#fff;border-radius:14px;padding:20px;box-shadow:0 12px 35px rgba(0,0,0,0.08);margin-bottom:18px;}"
+            "h1,h2{margin:0 0 12px 0;color:#0f4c5c;} table{width:100%;border-collapse:collapse;}"
+            "th,td{padding:10px;border-bottom:1px solid #e5e7eb;text-align:left;} th{background:#eef6f7;}"
+            ".kpis{display:flex;gap:12px;flex-wrap:wrap}.kpi{background:#eef6f7;border-radius:10px;padding:12px 14px;min-width:180px}"
+            ".muted{color:#5b6470}"
+            "</style></head><body>"
+            "<div class='card'>"
+            "<h1>Rapport d'estimation de ressources</h1>"
+            f"<p class='muted'>Généré le {report_payload['generated_at']}</p>"
+            f"<p><strong>Couche assay :</strong> {assay_layer_name or 'n/a'}<br>"
+            f"<strong>Champ analysé :</strong> {grade_field or 'n/a'}<br>"
+            f"<strong>Méthode :</strong> {payload.get('method')}<br>"
+            f"<strong>Cutoff :</strong> {payload.get('cutoff')}<br>"
+            f"<strong>Densité :</strong> {payload.get('density')} t/m3</p>"
+            "</div>"
+            "<div class='card'><h2>Indicateurs globaux</h2>"
+            "<div class='kpis'>"
+            f"<div class='kpi'><strong>Tonnage total</strong><br>{total.get('total_tonnage_t', 0)} t</div>"
+            f"<div class='kpi'><strong>Teneur moyenne</strong><br>{total.get('global_mean_grade_pct', 0)} %</div>"
+            f"<div class='kpi'><strong>Métal contenu</strong><br>{total.get('total_metal_t', 0)} t</div>"
+            f"<div class='kpi'><strong>Blocs générés</strong><br>{payload.get('block_count', 0)}</div>"
+            "</div></div>"
+            "<div class='card'><h2>Catégories de ressources</h2>"
+            "<table><thead><tr><th>Catégorie</th><th>Blocs</th><th>Tonnage (t)</th><th>Teneur (%)</th><th>Métal contenu (t)</th></tr></thead>"
+            f"<tbody>{category_rows_html}</tbody></table>"
+            "</div>"
+            f"<div class='card'><h2>Points de vigilance</h2><ul>{warnings_html}</ul></div>"
+            "</body></html>"
+        )
+
+        with open(html_path, "w", encoding="utf-8") as handle:
+            handle.write(html)
+
+        export_result = {
+            "success": True,
+            "message": "Rapport de ressources exporté.",
+            "json_path": json_path,
+            "html_path": html_path,
+        }
+        self.last_resource_report_paths = export_result
+        return export_result
+
     def _extract_layer_name_from_prompt(self, prompt: str):
+        if self.iface:
+            try:
+                from qgis.core import QgsProject
+
+                available_names = sorted(
+                    (layer.name() for layer in QgsProject.instance().mapLayers().values() if layer and layer.name()),
+                    key=len,
+                    reverse=True,
+                )
+                lowered_prompt = prompt.lower()
+                for layer_name in available_names:
+                    if layer_name.lower() in lowered_prompt:
+                        return layer_name
+            except Exception:
+                pass
+
         patterns = [
             r"couche raster\s+([^\n,.]+)",
             r"couche\s*:\s*([^\n,]+)",
+            r"sur\s+([A-Za-z0-9_()\- ]+)",
             r"couche\s+([^\n,.]+)",
             r"layer\s+([^\n,.]+)",
         ]
@@ -607,8 +1537,162 @@ class MtumishiOrchestrator:
                     return candidate
         return None
 
+    def _extract_grade_field_from_prompt(self, prompt: str):
+        patterns = [
+            r"champ\s+([A-Za-z0-9_]+)",
+            r"teneur\s+(?:en|de)?\s*([A-Za-z0-9_]+)",
+            r"grade\s+(?:field|champ)?\s*([A-Za-z0-9_]+)",
+            r"\b(cu_pct|au_ppm|zn_pct|pb_pct|fe_pct|cu|au|zn|pb|fe)\b",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, prompt, flags=re.IGNORECASE)
+            if match:
+                return match.group(1)
+        return None
+
+    def _extract_cutoff_from_prompt(self, prompt: str):
+        match = re.search(r"(?:seuil|cutoff)\s*(?:>=|>|=|de)?\s*(-?\d+(?:[.,]\d+)?)", prompt, flags=re.IGNORECASE)
+        if not match:
+            return 0.0
+        return float(match.group(1).replace(",", "."))
+
+    def _has_cutoff_in_prompt(self, prompt: str):
+        return bool(re.search(r"(?:seuil|cutoff)\s*(?:>=|>|=|de)?\s*(-?\d+(?:[.,]\d+)?)", prompt, flags=re.IGNORECASE))
+
+    def _extract_eps_from_prompt(self, prompt: str):
+        match = re.search(r"\beps\s*(?:=|de)?\s*(\d+(?:[.,]\d+)?)", prompt, flags=re.IGNORECASE)
+        if not match:
+            return 25.0
+        return float(match.group(1).replace(",", "."))
+
+    def _extract_min_samples_from_prompt(self, prompt: str):
+        match = re.search(r"(?:min[_ ]?samples?|minimum d[’']?échantillons)\s*(?:=|de)?\s*(\d+)", prompt, flags=re.IGNORECASE)
+        if not match:
+            return 3
+        return int(match.group(1))
+
+    def _extract_density_from_prompt(self, prompt: str):
+        match = re.search(r"(?:densite|densité|density)\s*(?:=|de)?\s*(\d+(?:[.,]\d+)?)", prompt, flags=re.IGNORECASE)
+        if not match:
+            return 2.7
+        return float(match.group(1).replace(",", "."))
+
+    def _extract_search_range_from_prompt(self, prompt: str):
+        match = re.search(r"(?:search[_ ]?range|portee|portée|rayon)\s*(?:=|de)?\s*(\d+(?:[.,]\d+)?)", prompt, flags=re.IGNORECASE)
+        if not match:
+            return 100.0
+        return float(match.group(1).replace(",", "."))
+
+    def _extract_block_size_from_prompt(self, prompt: str):
+        match = re.search(
+            r"(?:taille de bloc|taille bloc|bloc(?:s)?|block size)\s*(?:=|de)?\s*(\d+(?:[.,]\d+)?)\s*[xX*,/ ]\s*(\d+(?:[.,]\d+)?)\s*[xX*,/ ]\s*(\d+(?:[.,]\d+)?)",
+            prompt,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return 25.0, 25.0, 10.0
+        return tuple(float(match.group(i).replace(",", ".")) for i in range(1, 4))
+
+    def _extract_resource_method_from_prompt(self, prompt: str):
+        text = prompt.lower()
+        if "krige" in text or "kriging" in text:
+            return "ordinary_kriging"
+        return "idw"
+
     def _detect_local_action(self, prompt: str):
         text = prompt.lower()
+
+        if (
+            any(keyword in text for keyword in ("exporte", "exporter", "sauvegarde", "génère", "genere"))
+            and any(keyword in text for keyword in ("rapport", "report"))
+            and any(keyword in text for keyword in ("ressource", "resource"))
+        ):
+            return {
+                "tool": "qgis_export_resource_report",
+                "args": {},
+                "summary_builder": self._build_resource_report_export_summary,
+            }
+
+        if (
+            any(keyword in text for keyword in ("ressource", "resource", "tonnage", "bloc", "block model", "krige", "kriging", "idw"))
+            and any(keyword in text for keyword in ("estime", "estimer", "estimation", "calcule", "calculer", "modele", "modèle", "interpole"))
+        ):
+            layer_name = self._extract_layer_name_from_prompt(prompt)
+            if not layer_name and "babbitt" in text:
+                layer_name = "assay_BABBITT"
+            block_size_x, block_size_y, block_size_z = self._extract_block_size_from_prompt(prompt)
+            cutoff = self._extract_cutoff_from_prompt(prompt) if self._has_cutoff_in_prompt(prompt) else 0.5
+            return {
+                "tool": "qgis_estimate_resources",
+                "args": {
+                    "assay_layer_name": layer_name,
+                    "collar_layer_name": "collar_BABBITT" if "babbitt" in text else None,
+                    "survey_layer_name": "survey_BABBITT" if "babbitt" in text else None,
+                    "grade_field": self._extract_grade_field_from_prompt(prompt),
+                    "cutoff": cutoff,
+                    "density": self._extract_density_from_prompt(prompt),
+                    "method": self._extract_resource_method_from_prompt(prompt),
+                    "block_size_x": block_size_x,
+                    "block_size_y": block_size_y,
+                    "block_size_z": block_size_z,
+                    "search_range": self._extract_search_range_from_prompt(prompt),
+                    "min_samples": self._extract_min_samples_from_prompt(prompt),
+                    "max_samples": 12,
+                },
+                "summary_builder": self._build_resource_estimate_summary,
+            }
+
+        if (
+            any(keyword in text for keyword in ("ouvre", "ouvrir", "affiche", "visualise", "visualisation"))
+            and "3d" in text
+            and any(keyword in text for keyword in ("chimbua", "forage", "forages", "html", "resultat", "résultat"))
+        ):
+            return {
+                "tool": "qgis_open_3d_result",
+                "args": {},
+                "summary_builder": self._build_open_3d_result_summary,
+            }
+
+        if (
+            any(keyword in text for keyword in ("chimbua", "forage", "forages", "drill", "assay", "collar", "survey"))
+            and any(keyword in text for keyword in ("lance", "lancer", "execute", "exécute", "run", "pipeline", "cluster", "dbscan", "visualisation 3d", "modélisation 3d", "modele 3d", "modelise"))
+        ):
+            layer_name = self._extract_layer_name_from_prompt(prompt)
+            if not layer_name and "babbitt" in text:
+                layer_name = "assay_BABBITT"
+            return {
+                "tool": "qgis_run_chimbua_pipeline",
+                "args": {
+                    "assay_layer_name": layer_name,
+                    "collar_layer_name": "collar_BABBITT" if "babbitt" in text else None,
+                    "survey_layer_name": "survey_BABBITT" if "babbitt" in text else None,
+                    "grade_field": self._extract_grade_field_from_prompt(prompt),
+                    "cutoff": self._extract_cutoff_from_prompt(prompt),
+                    "eps": self._extract_eps_from_prompt(prompt),
+                    "min_samples": self._extract_min_samples_from_prompt(prompt),
+                    "open_after_export": True,
+                },
+                "summary_builder": self._build_chimbua_pipeline_summary,
+            }
+
+        if (
+            any(keyword in text for keyword in ("forage", "forages", "drill", "assay", "collar", "survey", "3d", "ressource", "resource"))
+            and any(keyword in text for keyword in ("prepare", "prépare", "prepare-moi", "analyse", "analyse-moi", "comprend", "comprendre", "modele", "modél"))
+        ):
+            layer_name = self._extract_layer_name_from_prompt(prompt)
+            if not layer_name and "babbitt" in text:
+                layer_name = "assay_BABBITT"
+            return {
+                "tool": "qgis_prepare_drillhole_dataset",
+                "args": {
+                    "assay_layer_name": layer_name,
+                    "collar_layer_name": "collar_BABBITT" if "babbitt" in text else None,
+                    "survey_layer_name": "survey_BABBITT" if "babbitt" in text else None,
+                    "grade_field": self._extract_grade_field_from_prompt(prompt),
+                    "cutoff": self._extract_cutoff_from_prompt(prompt),
+                },
+                "summary_builder": self._build_drillhole_preparation_summary,
+            }
 
         if any(keyword in text for keyword in ("supprime", "supprimer", "retire", "retirer", "enleve", "enlever")) and "couche" in text:
             return {
@@ -690,6 +1774,148 @@ class MtumishiOrchestrator:
             f"La couche **{result.get('layer_name', target_name)}** a été supprimée avec succès."
         )
 
+    def _build_drillhole_preparation_summary(self, result: dict, _args: dict) -> str:
+        if not isinstance(result, dict) or not result.get("success"):
+            message = (result or {}).get("message", "préparation impossible")
+            return (
+                "### ⛏️ Préparation Forages\n\n"
+                f"La préparation des couches de forage a échoué : `{message}`"
+            )
+
+        layers = result.get("layers") or {}
+        schema = result.get("schema") or {}
+        stats = result.get("stats") or {}
+        preview = result.get("preview") or []
+        lines = [
+            "### ⛏️ Préparation Forages",
+            "",
+            "Les couches QGIS sont maintenant prêtes pour un futur pipeline Chimbua.",
+            "",
+            f"- **Assay** : {layers.get('assay') or 'non détectée'}",
+            f"- **Collar** : {layers.get('collar') or 'non détectée'}",
+            f"- **Survey** : {layers.get('survey') or 'non détectée'}",
+            f"- **Champ de teneur** : {result.get('grade_field') or 'non détecté'}",
+            f"- **Champ trou** : {schema.get('assay_hole_id_field') or 'non détecté'}",
+            f"- **From / To** : {schema.get('from_field') or 'n/a'} / {schema.get('to_field') or 'n/a'}",
+            f"- **Enregistrements préparés** : {result.get('records_prepared', 0)}",
+            f"- **Échantillons source** : {stats.get('source_feature_count', 0)}",
+        ]
+        if preview:
+            first = preview[0]
+            lines.extend([
+                "",
+                "**Aperçu du premier intervalle prêt**",
+                f"- Trou : `{first.get('hole_id')}`",
+                f"- Teneur : `{first.get('grade_value')}`",
+                f"- Profondeur médiane : `{first.get('mid_depth')}`",
+                f"- Position 3D : `({first.get('x')}, {first.get('y')}, {first.get('z')})`",
+            ])
+        return "\n".join(lines)
+
+    def _build_chimbua_pipeline_summary(self, result: dict, _args: dict) -> str:
+        if not isinstance(result, dict) or not result.get("success"):
+            message = (result or {}).get("message", "pipeline Chimbua impossible")
+            return (
+                "### ⛏️ Chimbua 3D\n\n"
+                f"Le pipeline Chimbua a échoué : `{message}`"
+            )
+
+        layers = result.get("layers") or {}
+        loaded = result.get("loaded_layers") or {}
+        stats = result.get("statistics") or {}
+        open_result = result.get("open_result") or {}
+        return "\n".join([
+            "### ⛏️ Chimbua 3D",
+            "",
+            "Le pipeline de forages Chimbua a été exécuté avec succès.",
+            "",
+            f"- **Assay** : {layers.get('assay') or 'non détectée'}",
+            f"- **Collar** : {layers.get('collar') or 'non détectée'}",
+            f"- **Survey** : {layers.get('survey') or 'non détectée'}",
+            f"- **Champ analysé** : {result.get('grade_field') or 'non détecté'}",
+            f"- **Intervalles traités** : {result.get('total_intervals', 0)}",
+            f"- **Clusters 3D** : {(result.get('clustering_summary') or {}).get('cluster_count', 0)}",
+            f"- **Couche QGIS créée** : {loaded.get('point_layer') or 'aucune'}",
+            f"- **Collars rechargés** : {loaded.get('collar_count', 0)}",
+            f"- **Sommets des volumes** : {loaded.get('hull_vertex_count', 0)}",
+            f"- **HTML 3D** : {result.get('output_html_path') or 'non généré'}",
+            f"- **Ouverture automatique** : {'oui' if open_result.get('success') else 'non'}",
+            f"- **Valeur max** : {stats.get('max', 'n/a')}",
+        ])
+
+    def _build_open_3d_result_summary(self, result: dict, _args: dict) -> str:
+        if not isinstance(result, dict) or not result.get("success"):
+            message = (result or {}).get("message") or "Impossible d'ouvrir la visualisation 3D."
+            return (
+                "### 🌐 Visualisation 3D\n\n"
+                f"{message}"
+            )
+        return (
+            "### 🌐 Visualisation 3D\n\n"
+            f"La visualisation 3D a été ouverte depuis `{result.get('html_path')}`."
+        )
+
+    def _build_resource_estimate_summary(self, result: dict, _args: dict) -> str:
+        if not isinstance(result, dict) or not result.get("success"):
+            message = (result or {}).get("message", "estimation de ressources impossible")
+            return (
+                "### 📦 Estimation de Ressources\n\n"
+                f"L'estimation de ressources a échoué : `{message}`"
+            )
+
+        report = result.get("report") or {}
+        total = report.get("total") or {}
+        categories = report.get("by_category") or []
+        exported = result.get("report_export") or {}
+        lines = [
+            "### 📦 Estimation de Ressources",
+            "",
+            "Le modèle de blocs Chimbua a été généré et classifié.",
+            "",
+            f"- **Méthode** : {result.get('method')}",
+            f"- **Champ analysé** : {result.get('grade_field') or 'non détecté'}",
+            f"- **Cutoff économique** : {result.get('cutoff')}",
+            f"- **Densité** : {result.get('density')} t/m3",
+            f"- **Trous utilisés** : {result.get('unique_hole_count', 0)}",
+            f"- **Points interpolés** : {result.get('sample_count', 0)}",
+            f"- **Blocs générés** : {result.get('block_count', 0)}",
+            f"- **Couche QGIS** : {(result.get('loaded_layers') or {}).get('resource_layer') or 'aucune'}",
+            f"- **Tonnage total** : {total.get('total_tonnage_t', 0)} t",
+            f"- **Teneur moyenne globale** : {total.get('global_mean_grade_pct', 0)} %",
+            f"- **Métal contenu** : {total.get('total_metal_t', 0)} t",
+            f"- **Rapport JSON** : {exported.get('json_path') or 'non exporté'}",
+            f"- **Rapport HTML** : {exported.get('html_path') or 'non exporté'}",
+        ]
+        if categories:
+            lines.extend(["", "**Catégories de ressources**"])
+            for item in categories:
+                lines.append(
+                    f"- **{item.get('category')}** : {item.get('block_count', 0)} blocs, "
+                    f"{item.get('tonnage_t', 0)} t à {item.get('mean_grade_pct', 0)} %"
+                )
+        warnings = result.get("warnings") or []
+        if warnings:
+            lines.extend(["", "**Points de vigilance**"])
+            for warning in warnings:
+                lines.append(f"- {warning}")
+        return "\n".join(lines)
+
+    def _build_resource_report_export_summary(self, result: dict, _args: dict) -> str:
+        if not isinstance(result, dict) or not result.get("success"):
+            message = (result or {}).get("message") or "Impossible d'exporter le rapport de ressources."
+            return (
+                "### 📄 Rapport Ressources\n\n"
+                f"{message}"
+            )
+        return "\n".join([
+            "### 📄 Rapport Ressources",
+            "",
+            "Le rapport de ressources a été exporté avec succès.",
+            "",
+            f"- **JSON** : {result.get('json_path')}",
+            f"- **HTML** : {result.get('html_path')}",
+        ])
+
     def _run_local_action(self, prompt: str):
         action = self._detect_local_action(prompt)
         if not action:
@@ -705,6 +1931,16 @@ class MtumishiOrchestrator:
             result = self._remove_layer(**args)
         elif tool_name == "qgis_execute_python_script":
             result = self._execute_qgis_python_script(**args)
+        elif tool_name == "qgis_prepare_drillhole_dataset":
+            result = self._prepare_drillhole_dataset(**args)
+        elif tool_name == "qgis_run_chimbua_pipeline":
+            result = self._run_chimbua_pipeline(**args)
+        elif tool_name == "qgis_open_3d_result":
+            result = self._open_3d_result(**args)
+        elif tool_name == "qgis_estimate_resources":
+            result = self._estimate_resources(**args)
+        elif tool_name == "qgis_export_resource_report":
+            result = self._export_resource_report(**args)
         else:
             raise ValueError(f"Outil local non pris en charge: {tool_name}")
 
