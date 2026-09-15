@@ -101,6 +101,7 @@ class PekuaEngineDialog(QDialog):
 
         self.txt_results = QTextEdit()
         self.txt_results.setReadOnly(True)
+        self.txt_results.setAcceptRichText(True)
         self.txt_results.setPlaceholderText("Les résultats et sources documentaires s'afficheront ici...")
         results_layout.addWidget(self.txt_results)
 
@@ -114,6 +115,63 @@ class PekuaEngineDialog(QDialog):
         btn_close_layout.addWidget(self.btn_close)
         main_layout.addLayout(btn_close_layout)
 
+    def _set_results_markdown(self, markdown_text: str):
+        try:
+            self.txt_results.setMarkdown(markdown_text)
+        except AttributeError:
+            self.txt_results.setPlainText(markdown_text)
+
+    def _build_rag_query(self, query: str, domain: str = None, province: str = None) -> str:
+        constraints = []
+        if domain and domain != "all":
+            constraints.append(f"domaine: {domain}")
+        if province:
+            constraints.append(f"province: {province}")
+
+        if not constraints:
+            return query
+
+        return (
+            "Réponds en tenant compte des contraintes documentaires suivantes: "
+            + ", ".join(constraints)
+            + f".\n\nQuestion utilisateur: {query}"
+        )
+
+    def _format_rag_sources(self, sources) -> str:
+        if not sources:
+            return "_Aucune source citée par le moteur RAG._"
+
+        lines = []
+        for idx, src in enumerate(sources[:5], start=1):
+            similarity = ""
+            if getattr(src, "similarity", None) is not None:
+                similarity = f" | similarité: {src.similarity:.3f}"
+            author = f" | auteur: {src.author}" if getattr(src, "author", None) else ""
+            title = getattr(src, "title", "Sans titre")
+            document_id = getattr(src, "document_id", "")
+            lines.append(f"{idx}. **{title}**{author}{similarity} | id: `{document_id or 'n/a'}`")
+        return "\n".join(lines)
+
+    def _format_document_results(self, docs) -> str:
+        if not docs or not getattr(docs, "results", None):
+            return "_Aucun document ciblé trouvé avec les filtres sélectionnés._"
+
+        lines = [f"**Documents trouvés** : {docs.total_found}"]
+        for idx, item in enumerate(docs.results[:5], start=1):
+            similarity = ""
+            if getattr(item, "similarity", None) is not None:
+                similarity = f" | similarité: {item.similarity:.3f}"
+            author = f" | auteur: {item.author}" if getattr(item, "author", None) else ""
+            url = f" | url: {item.document_url}" if getattr(item, "document_url", None) else ""
+            lines.append(f"{idx}. **{item.title}**{author}{similarity}{url}")
+
+            if getattr(item, "relevant_chunks", None):
+                excerpt = item.relevant_chunks[0].strip()
+                if len(excerpt) > 240:
+                    excerpt = excerpt[:237] + "..."
+                lines.append(f"   - Extrait: {excerpt}")
+        return "\n".join(lines)
+
     def perform_search(self):
         query = self.txt_query.text().strip()
         if not query:
@@ -123,31 +181,52 @@ class PekuaEngineDialog(QDialog):
         domain = self.cb_domain.currentData()
         province = self.cb_province.currentData()
 
-        self.txt_results.setText(f"⌛ Interrogation de la base Pekua RAG pour : '{query}'...")
+        self._set_results_markdown(f"⌛ Interrogation de la base Pekua RAG pour : `{query}`...")
         self.btn_search.setEnabled(False)
 
         # Récupération de la clé API depuis les paramètres
         settings = QSettings("GeoCongoAI", "GeoCongoAIPlugin")
         api_key = settings.value("api_keys/geocongo", "").strip()
+        server_url = settings.value("server/url", "").strip()
 
         if not api_key:
              QMessageBox.critical(self, "Clé API manquante", "Veuillez configurer votre clé API GeoCongo AI dans les Paramètres.")
              self.btn_search.setEnabled(True)
-             self.txt_results.setText("❌ Erreur : Aucune clé API configurée.")
+             self._set_results_markdown("❌ Erreur : aucune clé API configurée.")
              return
 
         try:
             from geocongoai.client import GeoCongoClient
-            client = GeoCongoClient(api_key=api_key)
-            
-            # Appel API RAG : ajout des paramètres domaine/province
-            res = client.ask_rag(query=query, domain=domain, province=province)
-            
-            response_text = f"### Résultats Pekua RAG (Live)\n- **Requête** : {query}\n\n**Synthèse :**\n{res.answer}\n\n**Sources :**\n{res.sources}"
-            
-            self.txt_results.setText(response_text)
+            client_kwargs = {"api_key": api_key}
+            if server_url:
+                client_kwargs["base_url"] = server_url
+            client = GeoCongoClient(**client_kwargs)
+
+            rag_query = self._build_rag_query(query, domain=domain, province=province)
+            rag_response = client.ask_rag(query=rag_query)
+
+            docs_response = client.search_documents(
+                query=query,
+                domain=None if domain in (None, "all") else domain,
+                province=province,
+            )
+
+            response_text = (
+                "### Résultats Pekua RAG (SDK v0.4.3)\n"
+                f"- **Question** : {query}\n"
+                f"- **Domaine** : {domain or 'Tous'}\n"
+                f"- **Province** : {province or 'Toutes'}\n\n"
+                "**Synthèse RAG**\n"
+                f"{rag_response.answer}\n\n"
+                "**Sources citées par Pekua**\n"
+                f"{self._format_rag_sources(rag_response.sources)}\n\n"
+                "**Recherche documentaire filtrée**\n"
+                f"{self._format_document_results(docs_response)}"
+            )
+
+            self._set_results_markdown(response_text)
             QgsMessageLog.logMessage(f"Recherche Pekua réussie pour : {query}", "GeoCongoAI", Qgis.Info)
         except Exception as e:
-            self.txt_results.setText(f"❌ Erreur lors de la recherche Pekua RAG :\n{str(e)}")
+            self._set_results_markdown(f"❌ Erreur lors de la recherche Pekua RAG :\n`{str(e)}`")
         finally:
             self.btn_search.setEnabled(True)
