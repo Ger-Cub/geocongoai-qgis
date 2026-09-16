@@ -595,8 +595,15 @@ class GeoCongoAIDockWidget(QDockWidget):
         dlg.exec_()
 
     def open_drillhole_dialog(self):
-        dlg = DrillholeAnalysisDialog(self.iface, self)
-        dlg.exec_()
+        try:
+            dlg = DrillholeAnalysisDialog(self.iface, self)
+            dlg.exec_()
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "GeoCongo AI - Chimbua",
+                f"Impossible d'ouvrir l'analyseur Chimbua 3D :\n{exc}",
+            )
 
     def open_settings(self):
         dlg = SettingsDialog(self)

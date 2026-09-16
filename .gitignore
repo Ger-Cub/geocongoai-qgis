@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+.gitignore
+SDKGeoCongoAIDoc.md
+testmtumishi.md

@@ -16,6 +16,7 @@ from datetime import datetime
 
 from qgis.PyQt.QtCore import QCoreApplication, QObject, QSettings, Qt, QThread, QVariant, pyqtSignal, pyqtSlot
 
+from .chimbua_visualization import apply_cluster_symbology, apply_grade_symbology, export_interactive_chimbua_html, make_qgis_symbol
 from .drillhole_adapter import build_resource_sample_points, prepare_drillhole_dataset, validate_resource_estimation_inputs
 
 
@@ -61,7 +62,11 @@ class MtumishiOrchestrator:
     Wrapper autour du vrai `geocongoai.Mtumishi` avec outils QGIS locaux.
     """
 
-    DEFAULT_SERVER_URL = "http://137.184.96.142:8000"
+    DEFAULT_SERVER_URL = ""
+    LEGACY_SERVER_URLS = {
+        "http://137.184.96.142:8000",
+        "https://137.184.96.142:8000",
+    }
     DEFAULT_MODEL = "gemini-2.5-flash"
 
     def __init__(self, iface=None):
@@ -100,6 +105,7 @@ class MtumishiOrchestrator:
         preferred_model: str = None,
     ):
         settings = QSettings("GeoCongoAI", "GeoCongoAIPlugin")
+        self.migrate_legacy_server_url(settings)
         loaded_gemini_key = settings.value("api_keys/gemini", "")
         loaded_geocongo_key = settings.value("api_keys/geocongo", "")
         loaded_server_url = settings.value("server/url", self.DEFAULT_SERVER_URL)
@@ -107,7 +113,8 @@ class MtumishiOrchestrator:
 
         self.gemini_key = (loaded_gemini_key if gemini_key is None else gemini_key or "").strip()
         self.geocongo_key = (loaded_geocongo_key if geocongo_key is None else geocongo_key or "").strip()
-        self.server_url = (loaded_server_url if server_url is None else server_url or self.DEFAULT_SERVER_URL).strip()
+        resolved_server_url = loaded_server_url if server_url is None else server_url or self.DEFAULT_SERVER_URL
+        self.server_url = self.normalize_server_url(resolved_server_url)
         self.preferred_model = (loaded_preferred_model if preferred_model is None else preferred_model or "").strip()
 
         new_signature = (
@@ -191,6 +198,23 @@ class MtumishiOrchestrator:
             return False
         lowered = url.lower()
         return "supabase" in lowered or "/functions/v1" in lowered
+
+    @classmethod
+    def normalize_server_url(cls, url: str) -> str:
+        normalized = (url or "").strip().rstrip("/")
+        if normalized in cls.LEGACY_SERVER_URLS:
+            return ""
+        return normalized
+
+    @classmethod
+    def migrate_legacy_server_url(cls, settings: QSettings = None) -> bool:
+        settings = settings or QSettings("GeoCongoAI", "GeoCongoAIPlugin")
+        current_value = settings.value("server/url", cls.DEFAULT_SERVER_URL)
+        normalized = cls.normalize_server_url(current_value)
+        if normalized == (current_value or "").strip():
+            return False
+        settings.setValue("server/url", normalized)
+        return True
 
     def _sanitize_user_visible_text(self, text: str) -> str:
         if not text:
@@ -515,6 +539,23 @@ class MtumishiOrchestrator:
                 }
             },
             handler=self._open_3d_result,
+        ))
+
+        self.mtumishi.register_tool(GeoTool(
+            name="qgis_style_chimbua_results",
+            description=(
+                "Applique une symbologie sur une couche de resultats Chimbua dans QGIS, "
+                "soit par cluster_id, soit par teneur/grade."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "layer_name": {"type": "string"},
+                    "mode": {"type": "string", "default": "cluster"},
+                    "grade_field": {"type": "string", "default": "grade"},
+                }
+            },
+            handler=self._style_chimbua_results,
         ))
 
         self.mtumishi.register_tool(GeoTool(
@@ -941,7 +982,7 @@ class MtumishiOrchestrator:
 
         html_code = None
         try:
-            html_code = geo_result.to_html(output_path=output_html_path)
+            html_code = export_interactive_chimbua_html(geo_result, output_path=output_html_path)
         except Exception:
             output_html_path = None
 
@@ -991,31 +1032,41 @@ class MtumishiOrchestrator:
         crs_authid = assay_layer.crs().authid() if assay_layer and assay_layer.crs().isValid() else "EPSG:4326"
         point_layer = QgsVectorLayer(f"PointZ?crs={crs_authid}", f"GeoCongo AI - Chimbua 3D ({grade_field or 'grade'})", "memory")
         point_provider = point_layer.dataProvider()
-        point_provider.addAttributes([
+        point_fields = [
             QgsField("hole_id", QVariant.String),
             QgsField("from_m", QVariant.Double),
             QgsField("to_m", QVariant.Double),
             QgsField("grade", QVariant.Double),
             QgsField("cluster_id", QVariant.Int),
             QgsField("z_elev", QVariant.Double),
-        ])
+        ]
+        if grade_field and grade_field.lower() != "grade":
+            point_fields.append(QgsField(grade_field, QVariant.Double))
+        point_provider.addAttributes(point_fields)
         point_layer.updateFields()
 
         point_features = []
         for point in getattr(geo_result, "points", []) or []:
             feature = QgsFeature(point_layer.fields())
             feature.setGeometry(QgsGeometry(QgsPoint(float(point["x"]), float(point["y"]), float(point["z"]))))
-            feature.setAttributes([
+            grade_value = float(point.get(grade_field, point.get("value", 0.0)) or 0.0)
+            attributes = [
                 str(point.get("hole_id", "")),
                 float(point.get("from_m", 0.0) or 0.0),
                 float(point.get("to_m", 0.0) or 0.0),
-                float(point.get(grade_field, point.get("value", 0.0)) or 0.0),
+                grade_value,
                 int(point.get("cluster", -1) or -1),
                 float(point.get("z", 0.0) or 0.0),
+            ]
+            if grade_field and grade_field.lower() != "grade":
+                attributes.append(grade_value)
+            feature.setAttributes([
+                *attributes
             ])
             point_features.append(feature)
         point_provider.addFeatures(point_features)
         point_layer.updateExtents()
+        apply_cluster_symbology(point_layer, cluster_field="cluster_id")
         QgsProject.instance().addMapLayer(point_layer)
         if hasattr(self.iface, "setActiveLayer"):
             self.iface.setActiveLayer(point_layer)
@@ -1126,6 +1177,51 @@ class MtumishiOrchestrator:
             "success": bool(opened),
             "message": "Visualisation 3D ouverte." if opened else "Impossible d'ouvrir automatiquement la visualisation 3D.",
             "html_path": target_path,
+        }
+
+    def _style_chimbua_results(
+        self,
+        layer_name: str = None,
+        mode: str = "cluster",
+        grade_field: str = "grade",
+    ):
+        return self._run_in_qgis_main_thread(self._style_chimbua_results_impl, layer_name, mode, grade_field)
+
+    def _style_chimbua_results_impl(
+        self,
+        layer_name: str = None,
+        mode: str = "cluster",
+        grade_field: str = "grade",
+    ):
+        layer = self._resolve_drillhole_layer_name(
+            layer_name,
+            preferred_keywords=("chimbua 3d", "cluster", "dbscan", "chimbua"),
+            allow_fallback=True,
+        )
+        if layer is None:
+            raise ValueError("Aucune couche de resultats Chimbua n'a ete trouvee.")
+
+        selected_mode = (mode or "cluster").strip().lower()
+        if selected_mode == "grade":
+            available_field_names = [field.name().lower() for field in layer.fields()]
+            target_grade_field = grade_field if grade_field and grade_field.lower() in available_field_names else "grade"
+            apply_grade_symbology(layer, grade_field=target_grade_field)
+            message = f"Symbologie appliquee par teneur ({target_grade_field})."
+        else:
+            apply_cluster_symbology(layer, cluster_field="cluster_id")
+            message = "Symbologie appliquee par cluster_id."
+
+        if hasattr(self.iface, "layerTreeView"):
+            self.iface.layerTreeView().refreshLayerSymbology(layer.id())
+        if hasattr(self.iface, "mapCanvas"):
+            self.iface.mapCanvas().refresh()
+
+        return {
+            "success": True,
+            "message": message,
+            "layer_name": layer.name(),
+            "mode": selected_mode,
+            "grade_field": target_grade_field if selected_mode == "grade" else grade_field,
         }
 
     def _estimate_resources(
@@ -1322,7 +1418,6 @@ class MtumishiOrchestrator:
             QgsPoint,
             QgsProject,
             QgsRendererCategory,
-            QgsSymbol,
             QgsVectorLayer,
         )
 
@@ -1371,10 +1466,10 @@ class MtumishiOrchestrator:
         }
         categories = []
         for category_name, color_code in category_colors.items():
-            symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-            if symbol is not None:
-                symbol.setColor(QColor(color_code))
-                symbol.setOpacity(0.9)
+            symbol = make_qgis_symbol(layer)
+            symbol.setColor(QColor(color_code))
+            symbol.setOpacity(0.9)
+            if hasattr(symbol, "setSize"):
                 symbol.setSize(3.2)
             categories.append(QgsRendererCategory(category_name, symbol, category_name))
         renderer = QgsCategorizedSymbolRenderer("category", categories)
@@ -1506,21 +1601,9 @@ class MtumishiOrchestrator:
         return export_result
 
     def _extract_layer_name_from_prompt(self, prompt: str):
-        if self.iface:
-            try:
-                from qgis.core import QgsProject
-
-                available_names = sorted(
-                    (layer.name() for layer in QgsProject.instance().mapLayers().values() if layer and layer.name()),
-                    key=len,
-                    reverse=True,
-                )
-                lowered_prompt = prompt.lower()
-                for layer_name in available_names:
-                    if layer_name.lower() in lowered_prompt:
-                        return layer_name
-            except Exception:
-                pass
+        matched_layers = self._find_project_layer_names_in_prompt(prompt)
+        if matched_layers:
+            return matched_layers[0]
 
         patterns = [
             r"couche raster\s+([^\n,.]+)",
@@ -1536,6 +1619,57 @@ class MtumishiOrchestrator:
                 if candidate:
                     return candidate
         return None
+
+    def _find_project_layer_names_in_prompt(self, prompt: str):
+        if not self.iface:
+            return []
+
+        try:
+            from qgis.core import QgsProject
+
+            lowered_prompt = prompt.lower()
+            matches = []
+            for layer in QgsProject.instance().mapLayers().values():
+                layer_name = layer.name() if layer else None
+                if not layer_name:
+                    continue
+                start_index = lowered_prompt.find(layer_name.lower())
+                if start_index != -1:
+                    matches.append((start_index, -len(layer_name), layer_name))
+            matches.sort()
+            return [layer_name for _, _, layer_name in matches]
+        except Exception:
+            return []
+
+    def _extract_drillhole_layers_from_prompt(self, prompt: str):
+        mentioned_layers = self._find_project_layer_names_in_prompt(prompt)
+        layer_map = {
+            "assay_layer_name": None,
+            "collar_layer_name": None,
+            "survey_layer_name": None,
+        }
+
+        for layer_name in mentioned_layers:
+            lowered = layer_name.lower()
+            if layer_map["assay_layer_name"] is None and any(token in lowered for token in ("assay", "sample", "interval")):
+                layer_map["assay_layer_name"] = layer_name
+                continue
+            if layer_map["collar_layer_name"] is None and any(token in lowered for token in ("collar", "head")):
+                layer_map["collar_layer_name"] = layer_name
+                continue
+            if layer_map["survey_layer_name"] is None and any(token in lowered for token in ("survey", "deviation", "devia")):
+                layer_map["survey_layer_name"] = layer_name
+
+        text = prompt.lower()
+        if "babbitt" in text:
+            layer_map["assay_layer_name"] = layer_map["assay_layer_name"] or "assay_BABBITT"
+            layer_map["collar_layer_name"] = layer_map["collar_layer_name"] or "collar_BABBITT"
+            layer_map["survey_layer_name"] = layer_map["survey_layer_name"] or "survey_BABBITT"
+
+        if layer_map["assay_layer_name"] is None and mentioned_layers:
+            layer_map["assay_layer_name"] = mentioned_layers[0]
+
+        return layer_map
 
     def _extract_grade_field_from_prompt(self, prompt: str):
         patterns = [
@@ -1599,8 +1733,32 @@ class MtumishiOrchestrator:
             return "ordinary_kriging"
         return "idw"
 
+    def _extract_style_mode_from_prompt(self, prompt: str):
+        text = prompt.lower()
+        if "cluster" in text or "cluster_id" in text:
+            return "cluster"
+        if any(token in text for token in ("teneur", "grade", "cu", "au", "zn", "pb", "fe")):
+            return "grade"
+        return "cluster"
+
     def _detect_local_action(self, prompt: str):
         text = prompt.lower()
+        drillhole_layers = self._extract_drillhole_layers_from_prompt(prompt)
+
+        if (
+            any(keyword in text for keyword in ("symbolog", "styl", "color", "couleur", "affich"))
+            and "chimbua" in text
+            and any(keyword in text for keyword in ("cluster", "cluster_id", "teneur", "grade", "cu", "au"))
+        ):
+            return {
+                "tool": "qgis_style_chimbua_results",
+                "args": {
+                    "layer_name": self._extract_layer_name_from_prompt(prompt),
+                    "mode": self._extract_style_mode_from_prompt(prompt),
+                    "grade_field": self._extract_grade_field_from_prompt(prompt) or "grade",
+                },
+                "summary_builder": self._build_style_chimbua_summary,
+            }
 
         if (
             any(keyword in text for keyword in ("exporte", "exporter", "sauvegarde", "génère", "genere"))
@@ -1617,17 +1775,14 @@ class MtumishiOrchestrator:
             any(keyword in text for keyword in ("ressource", "resource", "tonnage", "bloc", "block model", "krige", "kriging", "idw"))
             and any(keyword in text for keyword in ("estime", "estimer", "estimation", "calcule", "calculer", "modele", "modèle", "interpole"))
         ):
-            layer_name = self._extract_layer_name_from_prompt(prompt)
-            if not layer_name and "babbitt" in text:
-                layer_name = "assay_BABBITT"
             block_size_x, block_size_y, block_size_z = self._extract_block_size_from_prompt(prompt)
             cutoff = self._extract_cutoff_from_prompt(prompt) if self._has_cutoff_in_prompt(prompt) else 0.5
             return {
                 "tool": "qgis_estimate_resources",
                 "args": {
-                    "assay_layer_name": layer_name,
-                    "collar_layer_name": "collar_BABBITT" if "babbitt" in text else None,
-                    "survey_layer_name": "survey_BABBITT" if "babbitt" in text else None,
+                    "assay_layer_name": drillhole_layers["assay_layer_name"],
+                    "collar_layer_name": drillhole_layers["collar_layer_name"],
+                    "survey_layer_name": drillhole_layers["survey_layer_name"],
                     "grade_field": self._extract_grade_field_from_prompt(prompt),
                     "cutoff": cutoff,
                     "density": self._extract_density_from_prompt(prompt),
@@ -1643,6 +1798,25 @@ class MtumishiOrchestrator:
             }
 
         if (
+            any(keyword in text for keyword in ("chimbua", "forage", "forages", "drill", "assay", "collar", "survey"))
+            and any(keyword in text for keyword in ("lance", "lancer", "execute", "exécute", "run", "pipeline", "cluster", "dbscan", "visualisation 3d", "modélisation 3d", "modele 3d", "modelise"))
+        ):
+            return {
+                "tool": "qgis_run_chimbua_pipeline",
+                "args": {
+                    "assay_layer_name": drillhole_layers["assay_layer_name"],
+                    "collar_layer_name": drillhole_layers["collar_layer_name"],
+                    "survey_layer_name": drillhole_layers["survey_layer_name"],
+                    "grade_field": self._extract_grade_field_from_prompt(prompt),
+                    "cutoff": self._extract_cutoff_from_prompt(prompt),
+                    "eps": self._extract_eps_from_prompt(prompt),
+                    "min_samples": self._extract_min_samples_from_prompt(prompt),
+                    "open_after_export": True,
+                },
+                "summary_builder": self._build_chimbua_pipeline_summary,
+            }
+
+        if (
             any(keyword in text for keyword in ("ouvre", "ouvrir", "affiche", "visualise", "visualisation"))
             and "3d" in text
             and any(keyword in text for keyword in ("chimbua", "forage", "forages", "html", "resultat", "résultat"))
@@ -1654,40 +1828,15 @@ class MtumishiOrchestrator:
             }
 
         if (
-            any(keyword in text for keyword in ("chimbua", "forage", "forages", "drill", "assay", "collar", "survey"))
-            and any(keyword in text for keyword in ("lance", "lancer", "execute", "exécute", "run", "pipeline", "cluster", "dbscan", "visualisation 3d", "modélisation 3d", "modele 3d", "modelise"))
-        ):
-            layer_name = self._extract_layer_name_from_prompt(prompt)
-            if not layer_name and "babbitt" in text:
-                layer_name = "assay_BABBITT"
-            return {
-                "tool": "qgis_run_chimbua_pipeline",
-                "args": {
-                    "assay_layer_name": layer_name,
-                    "collar_layer_name": "collar_BABBITT" if "babbitt" in text else None,
-                    "survey_layer_name": "survey_BABBITT" if "babbitt" in text else None,
-                    "grade_field": self._extract_grade_field_from_prompt(prompt),
-                    "cutoff": self._extract_cutoff_from_prompt(prompt),
-                    "eps": self._extract_eps_from_prompt(prompt),
-                    "min_samples": self._extract_min_samples_from_prompt(prompt),
-                    "open_after_export": True,
-                },
-                "summary_builder": self._build_chimbua_pipeline_summary,
-            }
-
-        if (
             any(keyword in text for keyword in ("forage", "forages", "drill", "assay", "collar", "survey", "3d", "ressource", "resource"))
             and any(keyword in text for keyword in ("prepare", "prépare", "prepare-moi", "analyse", "analyse-moi", "comprend", "comprendre", "modele", "modél"))
         ):
-            layer_name = self._extract_layer_name_from_prompt(prompt)
-            if not layer_name and "babbitt" in text:
-                layer_name = "assay_BABBITT"
             return {
                 "tool": "qgis_prepare_drillhole_dataset",
                 "args": {
-                    "assay_layer_name": layer_name,
-                    "collar_layer_name": "collar_BABBITT" if "babbitt" in text else None,
-                    "survey_layer_name": "survey_BABBITT" if "babbitt" in text else None,
+                    "assay_layer_name": drillhole_layers["assay_layer_name"],
+                    "collar_layer_name": drillhole_layers["collar_layer_name"],
+                    "survey_layer_name": drillhole_layers["survey_layer_name"],
                     "grade_field": self._extract_grade_field_from_prompt(prompt),
                     "cutoff": self._extract_cutoff_from_prompt(prompt),
                 },
@@ -1734,6 +1883,37 @@ class MtumishiOrchestrator:
                 }
 
         return None
+
+    def _detect_local_actions(self, prompt: str):
+        segments = [segment.strip() for segment in re.split(r"[\n\r]+", prompt) if segment.strip()]
+        if len(segments) <= 1:
+            split_segments = []
+            for part in re.split(r"\b(?:puis|ensuite|and then)\b", prompt, flags=re.IGNORECASE):
+                cleaned = part.strip(" ,;")
+                if cleaned:
+                    split_segments.append(cleaned)
+            segments = split_segments or [prompt]
+
+        actions = []
+        seen = set()
+        for segment in segments:
+            action = self._detect_local_action(segment)
+            if not action:
+                continue
+            signature = (
+                action["tool"],
+                json.dumps(action.get("args") or {}, sort_keys=True, ensure_ascii=False, default=str),
+            )
+            if signature in seen:
+                continue
+            seen.add(signature)
+            actions.append(action)
+
+        if actions:
+            return actions
+
+        fallback_action = self._detect_local_action(prompt)
+        return [fallback_action] if fallback_action else []
 
     def _build_raster_symbology_summary(self, result: dict, args: dict) -> str:
         if not isinstance(result, dict) or not result.get("success"):
@@ -1916,40 +2096,68 @@ class MtumishiOrchestrator:
             f"- **HTML** : {result.get('html_path')}",
         ])
 
+    def _build_style_chimbua_summary(self, result: dict, _args: dict) -> str:
+        if not isinstance(result, dict) or not result.get("success"):
+            message = (result or {}).get("message") or "Impossible d'appliquer la symbologie Chimbua."
+            return (
+                "### 🎨 Symbologie Chimbua\n\n"
+                f"{message}"
+            )
+        mode_label = "par cluster_id" if result.get("mode") == "cluster" else f"par teneur ({result.get('grade_field')})"
+        return (
+            "### 🎨 Symbologie Chimbua\n\n"
+            f"La couche **{result.get('layer_name')}** est maintenant stylée {mode_label}."
+        )
+
     def _run_local_action(self, prompt: str):
-        action = self._detect_local_action(prompt)
-        if not action:
+        actions = self._detect_local_actions(prompt)
+        if not actions:
             return None
 
-        tool_name = action["tool"]
-        args = action["args"]
-        summary_builder = action["summary_builder"]
+        executed_actions = []
+        for action in actions:
+            tool_name = action["tool"]
+            args = action["args"]
+            summary_builder = action["summary_builder"]
 
-        if tool_name == "qgis_apply_raster_symbology":
-            result = self._apply_raster_symbology(**args)
-        elif tool_name == "qgis_remove_layer":
-            result = self._remove_layer(**args)
-        elif tool_name == "qgis_execute_python_script":
-            result = self._execute_qgis_python_script(**args)
-        elif tool_name == "qgis_prepare_drillhole_dataset":
-            result = self._prepare_drillhole_dataset(**args)
-        elif tool_name == "qgis_run_chimbua_pipeline":
-            result = self._run_chimbua_pipeline(**args)
-        elif tool_name == "qgis_open_3d_result":
-            result = self._open_3d_result(**args)
-        elif tool_name == "qgis_estimate_resources":
-            result = self._estimate_resources(**args)
-        elif tool_name == "qgis_export_resource_report":
-            result = self._export_resource_report(**args)
-        else:
-            raise ValueError(f"Outil local non pris en charge: {tool_name}")
+            if tool_name == "qgis_apply_raster_symbology":
+                result = self._apply_raster_symbology(**args)
+            elif tool_name == "qgis_remove_layer":
+                result = self._remove_layer(**args)
+            elif tool_name == "qgis_execute_python_script":
+                result = self._execute_qgis_python_script(**args)
+            elif tool_name == "qgis_prepare_drillhole_dataset":
+                result = self._prepare_drillhole_dataset(**args)
+            elif tool_name == "qgis_run_chimbua_pipeline":
+                result = self._run_chimbua_pipeline(**args)
+            elif tool_name == "qgis_open_3d_result":
+                result = self._open_3d_result(**args)
+            elif tool_name == "qgis_style_chimbua_results":
+                result = self._style_chimbua_results(**args)
+            elif tool_name == "qgis_estimate_resources":
+                result = self._estimate_resources(**args)
+            elif tool_name == "qgis_export_resource_report":
+                result = self._export_resource_report(**args)
+            else:
+                raise ValueError(f"Outil local non pris en charge: {tool_name}")
 
-        summary = summary_builder(result, args)
+            executed_actions.append({
+                "tool": tool_name,
+                "args": args,
+                "result": result,
+                "summary": summary_builder(result, args),
+            })
+
+        if len(executed_actions) == 1:
+            return executed_actions[0]
+
         return {
-            "tool": tool_name,
-            "args": args,
-            "result": result,
-            "summary": summary,
+            "multi": True,
+            "actions": executed_actions,
+            "tool": executed_actions[-1]["tool"],
+            "args": executed_actions[-1]["args"],
+            "result": executed_actions[-1]["result"],
+            "summary": "\n\n".join(action["summary"] for action in executed_actions if action.get("summary")),
         }
 
     def _execute_qgis_python_script(self, code: str):
@@ -2244,20 +2452,22 @@ class MtumishiOrchestrator:
                 "content": "Commande QGIS reconnue localement. Exécution directe sans délégation au runtime SDK.",
                 "metadata": {"runtime": "local-router"},
             }
-            yield {
-                "kind": "tool_call",
-                "content": f"Lancement de l'outil local {local_action['tool']}",
-                "metadata": {"tool": local_action["tool"], "args": local_action["args"]},
-            }
-            yield {
-                "kind": "tool_result",
-                "content": str(local_action["result"]),
-                "metadata": {
-                    "tool": local_action["tool"],
-                    "status": "success" if local_action["result"].get("success", True) else "error",
-                    "result": local_action["result"],
-                },
-            }
+            actions_to_emit = local_action.get("actions") if isinstance(local_action, dict) and local_action.get("multi") else [local_action]
+            for action_item in actions_to_emit:
+                yield {
+                    "kind": "tool_call",
+                    "content": f"Lancement de l'outil local {action_item['tool']}",
+                    "metadata": {"tool": action_item["tool"], "args": action_item["args"]},
+                }
+                yield {
+                    "kind": "tool_result",
+                    "content": str(action_item["result"]),
+                    "metadata": {
+                        "tool": action_item["tool"],
+                        "status": "success" if action_item["result"].get("success", True) else "error",
+                        "result": action_item["result"],
+                    },
+                }
             self.last_run_result = None
             yield {
                 "kind": "text",

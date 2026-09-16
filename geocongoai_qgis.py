@@ -134,8 +134,15 @@ class GeoCongoAI:
         dlg.exec_()
 
     def run_drillholes(self):
-        dlg = DrillholeAnalysisDialog(self.iface)
-        dlg.exec_()
+        try:
+            dlg = DrillholeAnalysisDialog(self.iface)
+            dlg.exec_()
+        except Exception as exc:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "GeoCongo AI - Chimbua",
+                f"Impossible d'ouvrir l'outil Chimbua :\n{exc}",
+            )
 
     def toggle_dock(self):
         if self.dock_widget:

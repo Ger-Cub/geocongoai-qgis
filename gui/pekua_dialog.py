@@ -187,8 +187,6 @@ class PekuaEngineDialog(QDialog):
         # Récupération de la clé API depuis les paramètres
         settings = QSettings("GeoCongoAI", "GeoCongoAIPlugin")
         api_key = settings.value("api_keys/geocongo", "").strip()
-        server_url = settings.value("server/url", "").strip()
-
         if not api_key:
              QMessageBox.critical(self, "Clé API manquante", "Veuillez configurer votre clé API GeoCongo AI dans les Paramètres.")
              self.btn_search.setEnabled(True)
@@ -197,10 +195,9 @@ class PekuaEngineDialog(QDialog):
 
         try:
             from geocongoai.client import GeoCongoClient
-            client_kwargs = {"api_key": api_key}
-            if server_url:
-                client_kwargs["base_url"] = server_url
-            client = GeoCongoClient(**client_kwargs)
+            # Pour Pekua, on laisse le SDK gérer son endpoint par défaut.
+            # Le plugin ne fournit ici que la clé API utilisateur.
+            client = GeoCongoClient(api_key=api_key)
 
             rag_query = self._build_rag_query(query, domain=domain, province=province)
             rag_response = client.ask_rag(query=rag_query)
@@ -227,6 +224,12 @@ class PekuaEngineDialog(QDialog):
             self._set_results_markdown(response_text)
             QgsMessageLog.logMessage(f"Recherche Pekua réussie pour : {query}", "GeoCongoAI", Qgis.Info)
         except Exception as e:
-            self._set_results_markdown(f"❌ Erreur lors de la recherche Pekua RAG :\n`{str(e)}`")
+            error_text = str(e)
+            if "ConnectTimeout" in error_text or "timed out" in error_text.lower():
+                error_text += (
+                    "\n\nLe plugin transmet bien votre clé API, mais le service Pekua n'a pas répondu à temps. "
+                    "Vérifiez la connectivité réseau ou la disponibilité du service GeoCongo AI."
+                )
+            self._set_results_markdown(f"❌ Erreur lors de la recherche Pekua RAG :\n`{error_text}`")
         finally:
             self.btn_search.setEnabled(True)

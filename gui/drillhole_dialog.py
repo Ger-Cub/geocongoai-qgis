@@ -20,7 +20,13 @@ from qgis.PyQt.QtWidgets import (
 from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsMapLayerProxyModel, QgsProject, QgsVectorLayer
 from qgis.gui import QgsFieldComboBox, QgsMapLayerComboBox
 
-from ..utils.drillhole_adapter import build_no_result_message, detect_support_layers, prepare_drillhole_dataset
+from ..utils.chimbua_visualization import apply_cluster_symbology, export_interactive_chimbua_html
+from ..utils.drillhole_adapter import (
+    build_no_result_message,
+    detect_support_layers,
+    infer_grade_field_name,
+    prepare_drillhole_dataset,
+)
 
 
 def pure_python_dbscan(coords, eps, min_samples):
@@ -79,6 +85,9 @@ class DrillholeAnalysisDialog(QDialog):
         self.iface = iface
         self._last_geo_result = None
         self._last_prepared_dataset = None
+        self._auto_updating_support_layers = False
+        self._user_selected_collar_layer = False
+        self._user_selected_survey_layer = False
 
         self.setWindowTitle("GeoCongo AI - Drillhole & Géochimie DBSCAN")
         self.resize(520, 520)
@@ -120,12 +129,14 @@ class DrillholeAnalysisDialog(QDialog):
         self.cb_collar_layer = QgsMapLayerComboBox(self)
         self.cb_collar_layer.setFilters(QgsMapLayerProxyModel.PointLayer)
         self.cb_collar_layer.setAllowEmptyLayer(True)
+        self.cb_collar_layer.setLayer(None)
         selectors_layout.addWidget(self.cb_collar_layer)
 
         selectors_layout.addWidget(QLabel("Couche de trajectoires / Déviation (Surveys - optionnel) :"))
         self.cb_survey_layer = QgsMapLayerComboBox(self)
         self.cb_survey_layer.setFilters(QgsMapLayerProxyModel.VectorLayer)
         self.cb_survey_layer.setAllowEmptyLayer(True)
+        self.cb_survey_layer.setLayer(None)
         selectors_layout.addWidget(self.cb_survey_layer)
 
         self.lbl_no_layers = QLabel(
@@ -140,8 +151,6 @@ class DrillholeAnalysisDialog(QDialog):
         self.cb_field = QgsFieldComboBox(self)
         self.cb_field.setLayer(self.cb_layer.currentLayer())
         selectors_layout.addWidget(self.cb_field)
-
-        self.cb_layer.currentLayerChanged.connect(self._on_layer_changed)
         layout.addWidget(selectors_box)
 
         params_box = QGroupBox("⚙️ Paramètres DBSCAN")
@@ -222,28 +231,74 @@ class DrillholeAnalysisDialog(QDialog):
         btn_layout.addWidget(btn_close)
 
         layout.addLayout(btn_layout)
+        self._connect_layer_combo_signal()
+        self._connect_support_combo_signals()
         self._on_layer_changed()
+
+    def _connect_layer_combo_signal(self):
+        if hasattr(self.cb_layer, "layerChanged"):
+            self.cb_layer.layerChanged.connect(self._on_layer_changed)
+            return
+        if hasattr(self.cb_layer, "currentIndexChanged"):
+            self.cb_layer.currentIndexChanged.connect(self._on_layer_changed)
+
+    def _connect_support_combo_signals(self):
+        for combo, handler in (
+            (self.cb_collar_layer, self._on_collar_layer_changed),
+            (self.cb_survey_layer, self._on_survey_layer_changed),
+        ):
+            if hasattr(combo, "layerChanged"):
+                combo.layerChanged.connect(handler)
+            elif hasattr(combo, "currentIndexChanged"):
+                combo.currentIndexChanged.connect(handler)
+
+    def _on_collar_layer_changed(self, *_args):
+        if not self._auto_updating_support_layers:
+            self._user_selected_collar_layer = True
+
+    def _on_survey_layer_changed(self, *_args):
+        if not self._auto_updating_support_layers:
+            self._user_selected_survey_layer = True
+
+    def _set_preferred_grade_field(self, layer):
+        if not layer or not hasattr(self, "cb_field"):
+            return
+        preferred_field = infer_grade_field_name(layer)
+        if not preferred_field:
+            return
+        if hasattr(self.cb_field, "setField"):
+            self.cb_field.setField(preferred_field)
+            return
+        index = self.cb_field.findText(preferred_field) if hasattr(self.cb_field, "findText") else -1
+        if index >= 0 and hasattr(self.cb_field, "setCurrentIndex"):
+            self.cb_field.setCurrentIndex(index)
 
     def _on_layer_changed(self, *_args):
         layer = self.cb_layer.currentLayer()
-        self.cb_field.setLayer(layer)
+        if hasattr(self, "cb_field"):
+            self.cb_field.setLayer(layer)
         if not layer:
             self.lbl_no_layers.setVisible(True)
-            self.btn_run.setEnabled(False)
+            if hasattr(self, "btn_run"):
+                self.btn_run.setEnabled(False)
             return
 
         self.lbl_no_layers.setVisible(False)
-        self.btn_run.setEnabled(True)
+        if hasattr(self, "btn_run"):
+            self.btn_run.setEnabled(True)
+        self._set_preferred_grade_field(layer)
         collar_layer, survey_layer = detect_support_layers(
             layer,
             project_or_layers=QgsProject.instance(),
-            collar_layer=self.cb_collar_layer.currentLayer(),
-            survey_layer=self.cb_survey_layer.currentLayer(),
+            collar_layer=self.cb_collar_layer.currentLayer() if self._user_selected_collar_layer else None,
+            survey_layer=self.cb_survey_layer.currentLayer() if self._user_selected_survey_layer else None,
         )
-        if collar_layer:
+        self._auto_updating_support_layers = True
+        try:
             self.cb_collar_layer.setLayer(collar_layer)
-        if survey_layer:
             self.cb_survey_layer.setLayer(survey_layer)
+        finally:
+            self._auto_updating_support_layers = False
 
     def run_clustering(self):
         try:
@@ -430,6 +485,7 @@ class DrillholeAnalysisDialog(QDialog):
                     "eps": eps,
                     "min_samples": min_samples,
                 },
+                collars=(prepared.get("sdk_inputs") or {}).get("collars") or [],
             )
             self.btn_export_3d.setEnabled(True)
         except Exception as geo_error:
@@ -478,7 +534,7 @@ class DrillholeAnalysisDialog(QDialog):
             return
 
         try:
-            self._last_geo_result.to_html(output_path=file_path)
+            export_interactive_chimbua_html(self._last_geo_result, output_path=file_path)
             QMessageBox.information(
                 self,
                 "Export 3D Réussi",
@@ -490,43 +546,4 @@ class DrillholeAnalysisDialog(QDialog):
             QMessageBox.critical(self, "Erreur Export 3D", f"Impossible d'exporter le fichier HTML 3D :\n{exc}")
 
     def _apply_cluster_symbology(self, layer, cluster_counts):
-        """
-        Applies a categorized renderer with distinct colors for each cluster.
-        """
-        from qgis.PyQt.QtGui import QColor
-        from qgis.core import QgsCategorizedSymbolRenderer, QgsRendererCategory, QgsSymbol
-
-        categories = []
-
-        noise_symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-        noise_symbol.setColor(QColor(140, 140, 140, 130))
-        noise_symbol.setSize(2.5)
-        categories.append(QgsRendererCategory(-1, noise_symbol, "Bruit (-1)"))
-
-        palette = [
-            "#e41a1c",
-            "#377eb8",
-            "#4daf4a",
-            "#984ea3",
-            "#ff7f00",
-            "#ffff33",
-            "#a65628",
-            "#f781bf",
-            "#00ced1",
-            "#ff1493",
-            "#7fff00",
-            "#00bfff",
-            "#ff8c00",
-            "#9932cc",
-            "#808000",
-        ]
-
-        for index, cluster_id in enumerate(sorted(cluster_counts.keys())):
-            symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-            symbol.setColor(QColor(palette[index % len(palette)]))
-            symbol.setSize(4.5)
-            categories.append(QgsRendererCategory(cluster_id, symbol, f"Cluster {cluster_id} ({cluster_counts[cluster_id]} pts)"))
-
-        renderer = QgsCategorizedSymbolRenderer("cluster_id", categories)
-        layer.setRenderer(renderer)
-        layer.triggerRepaint()
+        apply_cluster_symbology(layer, cluster_counts=cluster_counts, cluster_field="cluster_id")

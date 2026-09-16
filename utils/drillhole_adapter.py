@@ -26,6 +26,7 @@ TO_FIELD_NAMES = ("to", "to_m", "dept_to", "depth_to")
 Z_FIELD_NAMES = ("z", "elevation", "zcollar", "alt", "depth")
 AZIMUTH_FIELD_NAMES = ("az", "azimuth", "bearing", "dir")
 DIP_FIELD_NAMES = ("dip", "inclination", "inc", "plunge")
+SURVEY_DEPTH_FIELD_NAMES = ("at", "at_m", "depth", "depth_m", "measured_depth", "md")
 LIKELY_GRADE_FIELDS = (
     "cu_pct",
     "au_ppm",
@@ -136,6 +137,25 @@ def _is_point_layer(layer):
     return bool(_is_valid_vector_layer(layer) and _is_spatial(layer) and getattr(layer, "geometryType", lambda: None)() == 0)
 
 
+def _is_generated_analysis_layer(layer):
+    if not layer:
+        return False
+    lowered = str(getattr(layer, "name", lambda: "")() if callable(getattr(layer, "name", None)) else "").lower()
+    blocked_tokens = (
+        "clusters_dbscan",
+        "dbscan",
+        "geocongo ai - chimbua",
+        "chimbua 3d",
+        "chimbua collars",
+        "hull vertices",
+        "ressources",
+        "resources",
+        "greenfield",
+        "gundua",
+    )
+    return any(token in lowered for token in blocked_tokens)
+
+
 def detect_support_layers(assay_layer, project_or_layers=None, collar_layer=None, survey_layer=None):
     layers = _project_layers(project_or_layers)
     if collar_layer and survey_layer:
@@ -153,7 +173,7 @@ def detect_support_layers(assay_layer, project_or_layers=None, collar_layer=None
 
     if detected_collar is None:
         for layer in layers:
-            if layer is assay_layer or not _is_point_layer(layer):
+            if layer is assay_layer or not _is_point_layer(layer) or _is_generated_analysis_layer(layer):
                 continue
             if "collar" in layer.name().lower() or "head" in layer.name().lower():
                 detected_collar = layer
@@ -161,7 +181,7 @@ def detect_support_layers(assay_layer, project_or_layers=None, collar_layer=None
 
         if detected_collar is None and assay_hole_field:
             for layer in layers:
-                if layer is assay_layer or not _is_point_layer(layer):
+                if layer is assay_layer or not _is_point_layer(layer) or _is_generated_analysis_layer(layer):
                     continue
                 layer_field_names = [field.name() for field in layer.fields()]
                 matched = match_field_name(
@@ -175,10 +195,15 @@ def detect_support_layers(assay_layer, project_or_layers=None, collar_layer=None
 
     if detected_survey is None:
         for layer in layers:
-            if layer is assay_layer or not _is_valid_vector_layer(layer):
+            if layer is assay_layer or not _is_valid_vector_layer(layer) or _is_generated_analysis_layer(layer):
                 continue
             lname = layer.name().lower()
-            if "survey" in lname or "devia" in lname:
+            layer_field_names = [field.name() for field in layer.fields()]
+            has_survey_fields = bool(
+                match_field_name(layer_field_names, exact_names=AZIMUTH_FIELD_NAMES)
+                or match_field_name(layer_field_names, exact_names=DIP_FIELD_NAMES)
+            )
+            if "survey" in lname or "devia" in lname or has_survey_fields:
                 detected_survey = layer
                 break
 
@@ -205,6 +230,7 @@ def infer_drillhole_schema(assay_layer, collar_layer=None, survey_layer=None, gr
         "collar_hole_id_field": None,
         "collar_z_field": None,
         "survey_hole_id_field": None,
+        "survey_depth_field": None,
         "survey_azimuth_field": None,
         "survey_dip_field": None,
     }
@@ -229,6 +255,7 @@ def infer_drillhole_schema(assay_layer, collar_layer=None, survey_layer=None, gr
             ),
             contains_tokens=("hole", "dh"),
         )
+        schema["survey_depth_field"] = match_field_name(survey_field_names, exact_names=SURVEY_DEPTH_FIELD_NAMES)
         schema["survey_azimuth_field"] = match_field_name(survey_field_names, exact_names=AZIMUTH_FIELD_NAMES)
         schema["survey_dip_field"] = match_field_name(survey_field_names, exact_names=DIP_FIELD_NAMES)
 
@@ -289,6 +316,7 @@ def _build_survey_lookup(survey_layer, schema):
         return lookup
 
     hole_index = _find_field_index(survey_layer, schema.get("survey_hole_id_field"))
+    depth_index = _find_field_index(survey_layer, schema.get("survey_depth_field"))
     azimuth_index = _find_field_index(survey_layer, schema.get("survey_azimuth_field"))
     dip_index = _find_field_index(survey_layer, schema.get("survey_dip_field"))
     if hole_index == -1 or (azimuth_index == -1 and dip_index == -1):
@@ -298,11 +326,140 @@ def _build_survey_lookup(survey_layer, schema):
         hole_value = feature.attribute(hole_index)
         if hole_value is None:
             continue
-        lookup[str(hole_value).strip().lower()] = {
+        lookup.setdefault(str(hole_value).strip().lower(), []).append({
+            "depth": safe_float(feature.attribute(depth_index)) if depth_index != -1 else None,
             "azimuth": safe_float(feature.attribute(azimuth_index)) if azimuth_index != -1 else 0.0,
             "dip": safe_float(feature.attribute(dip_index)) if dip_index != -1 else 90.0,
-        }
+            "feature_id": feature.id(),
+        })
+
+    for hole_id, rows in lookup.items():
+        rows.sort(key=lambda item: (
+            item.get("depth") is None,
+            float(item.get("depth") or 0.0),
+            int(item.get("feature_id") or 0),
+        ))
     return lookup
+
+
+def _pick_survey_station(survey_lookup, hole_id, mid_depth=None):
+    stations = survey_lookup.get((hole_id or "").strip().lower()) or []
+    if not stations:
+        return None
+
+    target_depth = safe_float(mid_depth)
+    if target_depth is None:
+        return stations[0]
+
+    with_depth = [station for station in stations if station.get("depth") is not None]
+    if not with_depth:
+        return stations[0]
+
+    candidate = with_depth[0]
+    for station in with_depth:
+        if float(station["depth"]) <= float(target_depth):
+            candidate = station
+        else:
+            break
+    return candidate
+
+
+def _advance_along_orientation(x_value, y_value, z_value, segment_length, azimuth_deg, dip_deg):
+    azimuth_rad = math.radians(float(azimuth_deg or 0.0))
+    dip_rad = math.radians(abs(float(dip_deg if dip_deg is not None else -90.0)))
+    horizontal_distance = float(segment_length) * math.cos(dip_rad)
+    dz = -float(segment_length) * math.sin(dip_rad)
+    dx = horizontal_distance * math.sin(azimuth_rad)
+    dy = horizontal_distance * math.cos(azimuth_rad)
+    return x_value + dx, y_value + dy, z_value + dz
+
+
+def compute_downhole_position(collar_info, survey_stations, target_depth):
+    if not collar_info:
+        return None
+
+    point = collar_info.get("point")
+    if point is None:
+        return None
+
+    target_depth = max(0.0, safe_float(target_depth) or 0.0)
+    current_x = float(point.x())
+    current_y = float(point.y())
+    current_z = float(safe_float(collar_info.get("z")) or 0.0)
+
+    if target_depth <= 0.0:
+        return {"x": current_x, "y": current_y, "z": current_z}
+
+    stations = list(survey_stations or [])
+    if not stations:
+        current_z -= target_depth
+        return {"x": current_x, "y": current_y, "z": current_z}
+
+    stations_with_depth = [station for station in stations if station.get("depth") is not None]
+    if not stations_with_depth:
+        first_station = stations[0]
+        current_x, current_y, current_z = _advance_along_orientation(
+            current_x,
+            current_y,
+            current_z,
+            target_depth,
+            first_station.get("azimuth"),
+            first_station.get("dip"),
+        )
+        return {"x": current_x, "y": current_y, "z": current_z}
+
+    stations_with_depth.sort(key=lambda item: float(item.get("depth") or 0.0))
+    first_station = stations_with_depth[0]
+    current_depth = 0.0
+    active_station = first_station
+
+    if float(first_station.get("depth") or 0.0) > 0.0:
+        segment = min(target_depth, float(first_station["depth"])) - current_depth
+        if segment > 0.0:
+            current_x, current_y, current_z = _advance_along_orientation(
+                current_x,
+                current_y,
+                current_z,
+                segment,
+                first_station.get("azimuth"),
+                first_station.get("dip"),
+            )
+            current_depth += segment
+        if current_depth >= target_depth:
+            return {"x": current_x, "y": current_y, "z": current_z}
+
+    for station in stations_with_depth[1:]:
+        station_depth = float(station.get("depth") or 0.0)
+        if station_depth <= current_depth:
+            active_station = station
+            continue
+        next_depth = min(target_depth, station_depth)
+        segment = next_depth - current_depth
+        if segment > 0.0:
+            current_x, current_y, current_z = _advance_along_orientation(
+                current_x,
+                current_y,
+                current_z,
+                segment,
+                active_station.get("azimuth"),
+                active_station.get("dip"),
+            )
+            current_depth = next_depth
+        active_station = station
+        if current_depth >= target_depth:
+            return {"x": current_x, "y": current_y, "z": current_z}
+
+    if current_depth < target_depth:
+        current_x, current_y, current_z = _advance_along_orientation(
+            current_x,
+            current_y,
+            current_z,
+            target_depth - current_depth,
+            active_station.get("azimuth"),
+            active_station.get("dip"),
+        )
+
+    return {"x": current_x, "y": current_y, "z": current_z}
 
 
 def _build_sdk_assays(assay_layer, schema):
@@ -346,7 +503,7 @@ def _build_sdk_collars(collar_layer, records, schema, survey_lookup):
             point = geometry.asPoint() if not geometry.isMultipart() else (geometry.asMultiPoint()[0] if geometry.asMultiPoint() else None)
             if point is None:
                 continue
-            survey_info = survey_lookup.get(str(hole_value).strip().lower(), {})
+            survey_info = _pick_survey_station(survey_lookup, str(hole_value).strip(), 0.0) or {}
             collars.append({
                 "hole_id": str(hole_value).strip(),
                 "x": float(point.x()),
@@ -362,7 +519,7 @@ def _build_sdk_collars(collar_layer, records, schema, survey_lookup):
         hole_id = record["hole_id"]
         if hole_id in seen:
             continue
-        survey_info = survey_lookup.get(hole_id.lower(), {})
+        survey_info = _pick_survey_station(survey_lookup, hole_id, record.get("mid_depth")) or {}
         seen[hole_id] = {
             "hole_id": hole_id,
             "x": float(record["point"].x()),
@@ -379,6 +536,7 @@ def _build_sdk_survey(survey_layer, schema):
         return []
 
     hole_index = _find_field_index(survey_layer, schema.get("survey_hole_id_field"))
+    depth_index = _find_field_index(survey_layer, schema.get("survey_depth_field"))
     azimuth_index = _find_field_index(survey_layer, schema.get("survey_azimuth_field"))
     dip_index = _find_field_index(survey_layer, schema.get("survey_dip_field"))
     if hole_index == -1:
@@ -391,6 +549,7 @@ def _build_sdk_survey(survey_layer, schema):
             continue
         survey_rows.append({
             "hole_id": str(hole_value).strip(),
+            "depth": safe_float(feature.attribute(depth_index)) if depth_index != -1 else None,
             "azimuth": safe_float(feature.attribute(azimuth_index)) if azimuth_index != -1 else 0.0,
             "dip": safe_float(feature.attribute(dip_index)) if dip_index != -1 else -90.0,
         })
@@ -470,6 +629,9 @@ def prepare_drillhole_dataset(
 
         point = None
         collar_z = 0.0
+        collar_info = collar_lookup.get(hole_id.lower())
+        if collar_info:
+            collar_z = collar_info["z"] or 0.0
         geometry = feature.geometry()
         if geometry and not geometry.isEmpty():
             point = geometry.asPoint() if not geometry.isMultipart() else (geometry.asMultiPoint()[0] if geometry.asMultiPoint() else None)
@@ -482,27 +644,16 @@ def prepare_drillhole_dataset(
             if x_value is not None and y_value is not None:
                 point = QgsPointXY(x_value, y_value)
 
-        if point is None and hole_id.lower() in collar_lookup:
-            collar_info = collar_lookup[hole_id.lower()]
+        if point is None and collar_info:
             point = collar_info["point"]
-            collar_z = collar_info["z"] or 0.0
 
-        if point is None:
-            continue
-
-        survey_info = survey_lookup.get(hole_id.lower())
-        if survey_info:
-            dip_deg = abs(survey_info.get("dip") if survey_info.get("dip") is not None else 90.0)
-            azimuth_deg = survey_info.get("azimuth") or 0.0
-            dip_rad = math.radians(dip_deg)
-            azimuth_rad = math.radians(azimuth_deg)
-            horizontal_distance = mid_depth * math.cos(dip_rad)
-            dz = -mid_depth * math.sin(dip_rad)
-            dx = horizontal_distance * math.sin(azimuth_rad)
-            dy = horizontal_distance * math.cos(azimuth_rad)
-            point = QgsPointXY(point.x() + dx, point.y() + dy)
-            z_value = collar_z + dz
+        downhole_position = compute_downhole_position(collar_info, survey_lookup.get(hole_id.lower()), mid_depth)
+        if downhole_position:
+            point = QgsPointXY(downhole_position["x"], downhole_position["y"])
+            z_value = downhole_position["z"]
         else:
+            if point is None:
+                continue
             explicit_z = safe_float(feature.attribute(z_index)) if z_index != -1 else None
             if explicit_z is not None:
                 z_value = explicit_z

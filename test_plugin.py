@@ -12,12 +12,15 @@ if plugin_dir not in sys.path:
     sys.path.insert(0, plugin_dir)
 
 from utils.drillhole_adapter import (
+    compute_downhole_position,
+    _pick_survey_station,
     build_resource_sample_points,
     infer_grade_field_name,
     match_field_name,
     safe_float,
     validate_resource_estimation_inputs,
 )
+from utils.chimbua_visualization import NOISE_COLOR, cluster_color
 
 
 class TestGeoCongoAIPlugin(unittest.TestCase):
@@ -69,6 +72,39 @@ class TestGeoCongoAIPlugin(unittest.TestCase):
     def test_infer_grade_field_name_prefers_grade_like_columns(self):
         layer = self._FakeLayer(["hole_id", "depth_from", "depth_to", "cu_pct"])
         self.assertEqual(infer_grade_field_name(layer), "cu_pct")
+
+    def test_cluster_color_uses_noise_color_for_negative_clusters(self):
+        self.assertEqual(cluster_color(-1), NOISE_COLOR)
+        self.assertEqual(cluster_color("abc"), NOISE_COLOR)
+        self.assertNotEqual(cluster_color(0), NOISE_COLOR)
+
+    def test_pick_survey_station_uses_last_station_not_exceeding_depth(self):
+        lookup = {
+            "bh01": [
+                {"depth": 0.0, "azimuth": 10.0, "dip": -90.0, "feature_id": 1},
+                {"depth": 50.0, "azimuth": 25.0, "dip": -70.0, "feature_id": 2},
+                {"depth": 120.0, "azimuth": 40.0, "dip": -60.0, "feature_id": 3},
+            ]
+        }
+        station = _pick_survey_station(lookup, "BH01", 80.0)
+        self.assertIsNotNone(station)
+        self.assertEqual(station["azimuth"], 25.0)
+        self.assertEqual(station["dip"], -70.0)
+
+    def test_compute_downhole_position_accumulates_segments_from_survey_stations(self):
+        collar = {
+            "point": self._FakePoint(100.0, 200.0),
+            "z": 300.0,
+        }
+        stations = [
+            {"depth": 0.0, "azimuth": 0.0, "dip": -90.0, "feature_id": 1},
+            {"depth": 50.0, "azimuth": 90.0, "dip": -45.0, "feature_id": 2},
+        ]
+        position = compute_downhole_position(collar, stations, 100.0)
+        self.assertIsNotNone(position)
+        self.assertAlmostEqual(position["x"], 135.3553390593, places=5)
+        self.assertAlmostEqual(position["y"], 200.0, places=5)
+        self.assertAlmostEqual(position["z"], 214.6446609407, places=5)
 
     def test_validate_resource_estimation_inputs_accepts_minimal_valid_dataset(self):
         prepared = {

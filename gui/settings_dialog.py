@@ -74,11 +74,12 @@ class SettingsDialog(QDialog):
         layout.addWidget(group_keys)
 
         # 2. Server Settings Group
-        group_server = QGroupBox("🌐 Connexion Serveur & Gundua Engine")
+        group_server = QGroupBox("🌐 Connexion Serveur Gundua")
         layout_server = QVBoxLayout(group_server)
 
-        layout_server.addWidget(QLabel("URL du serveur Gundua Engine / Pekua API :"))
-        self.txt_url = QLineEdit("http://137.184.96.142:8000")
+        layout_server.addWidget(QLabel("URL du serveur Gundua Engine (optionnel) :"))
+        self.txt_url = QLineEdit("")
+        self.txt_url.setPlaceholderText("Laisser vide pour le comportement par défaut")
         layout_server.addWidget(self.txt_url)
 
         self.btn_test = QPushButton("🧪 Tester la connexion au SDK")
@@ -146,17 +147,18 @@ class SettingsDialog(QDialog):
 
     def _load_settings(self):
         settings = QSettings("GeoCongoAI", "GeoCongoAIPlugin")
+        MtumishiOrchestrator.migrate_legacy_server_url(settings)
         self.txt_gemini_key.setText(settings.value("api_keys/gemini", ""))
         self.txt_geocongo_key.setText(settings.value("api_keys/geocongo", ""))
         self.txt_gemini_model.setText(settings.value("llm/gemini_model", ""))
-        self.txt_url.setText(settings.value("server/url", "http://137.184.96.142:8000"))
+        self.txt_url.setText(settings.value("server/url", ""))
 
     def save_settings(self):
         settings = QSettings("GeoCongoAI", "GeoCongoAIPlugin")
         settings.setValue("api_keys/gemini", self.txt_gemini_key.text().strip())
         settings.setValue("api_keys/geocongo", self.txt_geocongo_key.text().strip())
         settings.setValue("llm/gemini_model", self.txt_gemini_model.text().strip())
-        settings.setValue("server/url", self.txt_url.text().strip())
+        settings.setValue("server/url", MtumishiOrchestrator.normalize_server_url(self.txt_url.text()))
         
         QMessageBox.information(
             self,

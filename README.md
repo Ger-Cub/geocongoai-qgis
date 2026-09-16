@@ -56,9 +56,9 @@ python3 -m pip install --user --upgrade geocongoai google-genai protobuf
 Ouvrez `GeoCongo AI > Paramètres API & Serveur`, puis renseignez :
 
 - `Clé API Google Gemini` pour la conversation IA avancée avec Mtumishi.
-- `Clé API GeoCongo AI` pour accéder aux services GeoCongo.
+- `Clé API GeoCongo AI` pour accéder aux services GeoCongo AI.
 - `Modèle Gemini` si vous souhaitez forcer un modèle précis.
-- `URL du serveur` pour Gundua et Pekua si vous utilisez une instance spécifique.
+- `URL du serveur` seulement pour Gundua si vous utilisez une instance spécifique.
 
 ### Diagnostic Mtumishi
 
