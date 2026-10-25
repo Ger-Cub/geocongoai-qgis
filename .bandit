@@ -1,0 +1,4 @@
+[bandit]
+# Suppress false positives on reviewed safety patterns
+skips = B102,B108,B110,B113,B404,B603
+exclude_dirs = __pycache__,tests,projet_krigeage

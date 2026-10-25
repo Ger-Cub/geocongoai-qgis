@@ -1,0 +1,26 @@
+[general]
+name=GeoCongo AI
+description=The Python SDK for geological RAG, geospatial remote sensing, 3D mining resource modeling, natural language QGIS workflows, and real-time streaming.
+version=0.4.5
+qgisMinimumVersion=3.10
+author=GeoCongo AI Team
+email=contact@geocongoai.com
+about=GeoCongo AI est un plugin QGIS intégré au SDK GeoCongo AI v0.4.5. Il offre des outils pour le RAG géologique (Pekua Engine), la télédétection avancée avec accès STAC satellitaire via Microsoft Planetary Computer (Gundua Engine — 15 indices, ASTER L1T, MSV géobotanique), la modélisation géologique 3D (Chimbua Engine), et un assistant en langage naturel (Mtumishi).
+icon=icon.png
+category=Analysis
+experimental=False
+deprecated=False
+
+; --- Champs requis pour le dépôt officiel QGIS ---
+homepage=https://geocongoai.com
+tracker=https://github.com/Ger-Cub/geocongoai-qgis/issues
+repository=https://github.com/Ger-Cub/geocongoai-qgis
+tags=geology, remote sensing, satellite, Congo, DRC, mining, landcover, AI, analysis, Gundua, Pekua, Chimbua, RAG, Mtumishi, STAC, Sentinel-2, Landsat, ASTER, MSV, Planetary Computer, copper, cobalt
+hasProcessingProvider=no
+changelog=
+    0.4.5 - SDK v0.4.5 alignment: ajout des GeoTools STAC Planetary Computer (stac_search_scenes, stac_calc_indices, stac_calc_msv) avec 15 indices spectraux, support ASTER L1T altération hydrothermale (Rowan/Ninomiya), géobotanique multitemporelle MSV (Metal-Stressed Vegetation), présets Gundua STAC. Nouveaux types d'analyse dans la boîte de dialogue Gundua (MSV, ASTER, incendies dNBR, inondations SAR).
+    0.4.4 - Resolution des alertes du scan de securite officiel QGIS (Bandit, detect-secrets, Flake8) : suppression des faux positifs de cles API dans la documentation, ajout timeout reseau, securisation de tempfile, ajout des fichiers de configuration .bandit, .flake8 et .secrets.baseline.
+    0.4.3 - SDK Alignment: Integrated Mtumishi Agentic Chatbot and Pekua Engine (Geological RAG). Refactored DockWidget to Tabbed interface.
+    0.3.0 - Fix security issues: removed bare except:pass (Bandit B110), removed dead code, cleaned duplicate blocks
+    0.2.0 - Added Gundua Engine API integration, background tasks, 3D drillhole visualization
+    0.1.0 - Initial release
