@@ -521,18 +521,102 @@ class GeoCongoAIDockWidget(QDockWidget):
             self.lbl_bbox_preview.setText(f"Erreur d'emprise: {e}")
 
     def _render_chat_history(self):
-        markdown_text = "\n\n".join(block for block in self._chat_blocks if block is not None)
-        try:
-            self.txt_chat_history.setMarkdown(markdown_text)
-        except AttributeError:
-            self.txt_chat_history.setPlainText(markdown_text)
+        style = """
+        <style>
+            body { font-family: sans-serif; background: #f3f5f7; color: #1f2937; }
+            .geo-bubble {
+                border-radius: 14px;
+                padding: 12px 14px;
+                margin: 10px 0;
+                border: 1px solid #dfe7ee;
+                background: #ffffff;
+                box-shadow: 0 1px 0 rgba(15, 23, 42, 0.03);
+            }
+            .geo-bubble.user {
+                background: #eaf6f4;
+                border-color: #cfe5e2;
+                margin-left: 40px;
+            }
+            .geo-bubble.assistant {
+                background: #f7f9fb;
+                border-color: #e2e8f0;
+                margin-right: 40px;
+            }
+            .geo-bubble.trace {
+                background: #f3f8ff;
+                border-color: #d9e7f7;
+                margin-right: 40px;
+            }
+            .geo-title {
+                font-size: 12px;
+                font-weight: 700;
+                color: #0f766e;
+                margin-bottom: 8px;
+            }
+            .geo-body {
+                font-size: 13px;
+                line-height: 1.5;
+                color: #1f2937;
+            }
+            b { color: #0f172a; }
+            i { color: #475569; }
+        </style>
+        """
+
+        html_blocks = []
+        for block in (self._chat_blocks or []):
+            if not block:
+                continue
+            text = str(block)
+            if text.startswith("👤 **Vous**"):
+                body = text.split(":", 1)[1].strip() if ":" in text else text
+                html_blocks.append(self._bubble_html("user", "Vous", body))
+            elif text.startswith("🤖 **Mtumishi"):
+                body = text.split(":", 1)[1].strip() if ":" in text else text
+                html_blocks.append(self._bubble_html("assistant", "Mtumishi", body))
+            elif text.startswith("🧠 **Ce que fait Mtumishi"):
+                body = text.split("**Ce que fait Mtumishi en coulisse**", 1)[1].strip() if "**Ce que fait Mtumishi en coulisse**" in text else text
+                html_blocks.append(self._bubble_html("trace", "Ce que fait Mtumishi", body))
+            else:
+                html_blocks.append(self._bubble_html("assistant", "Mtumishi", text))
+
+        self.txt_chat_history.setHtml(style + "".join(html_blocks))
         scrollbar = self.txt_chat_history.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
+
+    def _bubble_html(self, role: str, title: str, body: str) -> str:
+        cleaned = body.strip()
+        cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
+        cleaned = self._format_chat_html(cleaned)
+        return (
+            f'<div class="geo-bubble {role}">'
+            f'<div class="geo-title">{title}</div>'
+            f'<div class="geo-body">{cleaned}</div>'
+            f'</div>'
+        )
+
+    def _format_chat_html(self, text: str) -> str:
+        escaped = re.sub(r"\n+", "<br>", text)
+        escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
+        escaped = re.sub(r"\*(.+?)\*", r"<i>\1</i>", escaped)
+        return escaped
 
     def _append_chat_block(self, markdown_text: str):
         self._chat_blocks.append(markdown_text)
         self._render_chat_history()
         return len(self._chat_blocks) - 1
+
+    def _build_user_block(self, message: str) -> str:
+        return f"👤 **Vous** :\n\n{message}"
+
+    def _build_assistant_block(self, message: str) -> str:
+        return f"🤖 **Mtumishi (Assistant QGIS)** :\n\n{message}"
+
+    def _build_trace_block(self) -> str:
+        if not self._pending_trace_lines:
+            return "🧠 **Ce que fait Mtumishi en coulisse**\n\n_En attente d'événements d'outils..._"
+        body = "\n".join(f"- {line}" for line in self._pending_trace_lines)
+        return f"🧠 **Ce que fait Mtumishi en coulisse**\n\n{body}"
 
     def _replace_chat_block(self, index: int, markdown_text: str):
         if index is None:
