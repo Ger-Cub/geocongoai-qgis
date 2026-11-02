@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Local reference modules not meant for Git tracking
+AI_Agent/
+
 # C extensions
 *.so
 
