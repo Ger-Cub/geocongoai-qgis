@@ -100,12 +100,12 @@ class GeoCongoAIDockWidget(QDockWidget):
         self.setStyleSheet(
             """
             QDockWidget {
-                background: #f5f7f8;
+                background: #f3f5f7;
                 color: #1f2937;
                 border: 1px solid #dfe7ee;
             }
             QWidget {
-                background: #f5f7f8;
+                background: #f3f5f7;
                 color: #1f2937;
             }
             QTabWidget::pane {
@@ -114,19 +114,20 @@ class GeoCongoAIDockWidget(QDockWidget):
                 background: #ffffff;
             }
             QTabBar::tab {
-                background: #edf2f7;
-                color: #374151;
+                background: #edf2f5;
+                color: #475569;
                 border: 1px solid #dfe7ee;
                 border-bottom: none;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-                padding: 7px 12px;
-                margin-right: 4px;
+                border-top-left-radius: 10px;
+                border-top-right-radius: 10px;
+                padding: 8px 14px;
+                margin-right: 5px;
+                min-height: 28px;
             }
             QTabBar::tab:selected {
                 background: #ffffff;
                 color: #0f766e;
-                border-color: #a7d7d3;
+                border-color: #cfe4e2;
                 font-weight: 600;
             }
             QGroupBox {
@@ -164,7 +165,7 @@ class GeoCongoAIDockWidget(QDockWidget):
             }
             QTextEdit, QPlainTextEdit {
                 border: 1px solid #dfe7ee;
-                border-radius: 10px;
+                border-radius: 12px;
                 background: #ffffff;
                 color: #1f2937;
                 padding: 8px;
@@ -240,10 +241,11 @@ class GeoCongoAIDockWidget(QDockWidget):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
 
-        # Title / Brand Header
+        # Header / brand bar
         header_layout = QHBoxLayout()
         header_layout.setContentsMargins(0, 0, 0, 0)
-        
+        header_layout.setSpacing(10)
+
         import os
         from qgis.PyQt.QtGui import QIcon, QPixmap
         plugin_dir = os.path.dirname(os.path.dirname(__file__))
@@ -251,7 +253,7 @@ class GeoCongoAIDockWidget(QDockWidget):
         if os.path.exists(logo_path):
             self.setWindowIcon(QIcon(logo_path))
             lbl_logo = QLabel()
-            lbl_logo.setPixmap(QPixmap(logo_path).scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            lbl_logo.setPixmap(QPixmap(logo_path).scaled(28, 28, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             header_layout.addWidget(lbl_logo)
 
         lbl_title = QLabel("<b>GeoCongo AI</b>")
@@ -266,7 +268,7 @@ class GeoCongoAIDockWidget(QDockWidget):
 
         layout.addLayout(header_layout)
 
-        # Tab Widget for Modules (Default tab: Mtumishi Agentic Assistant)
+        # Tabs section
         self.tabs = QTabWidget()
         self.tabs.setStyleSheet(
             """
@@ -277,7 +279,6 @@ class GeoCongoAIDockWidget(QDockWidget):
             """
         )
 
-        # Tab 1: 🤖 Mtumishi Agentic Chatbot
         tab_mtumishi = QWidget()
         layout_mtumishi = QVBoxLayout(tab_mtumishi)
         layout_mtumishi.setContentsMargins(0, 0, 0, 0)
@@ -315,7 +316,6 @@ class GeoCongoAIDockWidget(QDockWidget):
         runtime_warning_layout.addLayout(runtime_btn_layout)
         layout_mtumishi.addWidget(self.box_runtime_warning)
 
-        # Chat history area
         self.txt_chat_history = QTextEdit()
         self.txt_chat_history.setReadOnly(True)
         self.txt_chat_history.setAcceptRichText(True)
@@ -346,16 +346,13 @@ class GeoCongoAIDockWidget(QDockWidget):
         layout_mtumishi.addLayout(chat_input_layout)
         self.tabs.addTab(tab_mtumishi, "🤖 Mtumishi")
 
-        # Tab 2: 🔍 Pekua Engine (Recherche Documentaire)
         tab_pekua = QWidget()
         layout_pekua = QVBoxLayout(tab_pekua)
-
         box_pekua = QGroupBox("🔍 Pekua Engine (Knowledge Base RAG)")
         box_pekua_layout = QVBoxLayout(box_pekua)
         lbl_pekua_desc = QLabel("Recherche documentaire et sémantique dans les rapports d'exploration et thèses géologiques.")
         lbl_pekua_desc.setWordWrap(True)
         box_pekua_layout.addWidget(lbl_pekua_desc)
-
         btn_open_pekua = QPushButton("Ouvrir la Boîte de Dialogue Pekua RAG")
         btn_open_pekua.clicked.connect(self.open_pekua_dialog)
         box_pekua_layout.addWidget(btn_open_pekua)
@@ -363,16 +360,13 @@ class GeoCongoAIDockWidget(QDockWidget):
         layout_pekua.addStretch()
         self.tabs.addTab(tab_pekua, "🔍 Pekua")
 
-        # Tab 3: 🛰️ Gundua Engine & Greenfield
         tab_gundua = QWidget()
         layout_gundua = QVBoxLayout(tab_gundua)
-
         box_gundua = QGroupBox("🛰️ Gundua Engine API")
         box_gundua_layout = QVBoxLayout(box_gundua)
         lbl_gundua_desc = QLabel("Télédétection et prédiction des anomalies géologiques via l'API Gundua.")
         lbl_gundua_desc.setWordWrap(True)
         box_gundua_layout.addWidget(lbl_gundua_desc)
-
         btn_open_gundua = QPushButton("Lancer l'analyse Greenfield (BBOX Dynamique)")
         btn_open_gundua.clicked.connect(self.open_gundua_dialog)
         box_gundua_layout.addWidget(btn_open_gundua)
@@ -383,7 +377,6 @@ class GeoCongoAIDockWidget(QDockWidget):
         self.lbl_bbox_preview = QLabel("Calcul de l'emprise...")
         self.lbl_bbox_preview.setStyleSheet("font-family: monospace; color: #333;")
         box_bbox_layout.addWidget(self.lbl_bbox_preview)
-
         btn_refresh_bbox = QPushButton("🔄 Actualiser Emprise")
         btn_refresh_bbox.clicked.connect(self.update_bbox_preview)
         box_bbox_layout.addWidget(btn_refresh_bbox)
@@ -391,16 +384,13 @@ class GeoCongoAIDockWidget(QDockWidget):
         layout_gundua.addStretch()
         self.tabs.addTab(tab_gundua, "🛰️ Gundua")
 
-        # Tab 4: ⛏️ Chimbua Engine (Forages & 3D)
         tab_drill = QWidget()
         layout_drill = QVBoxLayout(tab_drill)
-
         box_drill = QGroupBox("⛏️ Chimbua Engine (Forages & Géochimie 3D)")
         box_drill_layout = QVBoxLayout(box_drill)
         lbl_drill_desc = QLabel("Clustering spatial DBSCAN et filtrage par seuil de teneur sur données de forages 3D.")
         lbl_drill_desc.setWordWrap(True)
         box_drill_layout.addWidget(lbl_drill_desc)
-
         btn_open_drill = QPushButton("Ouvrir l'analyseur Chimbua 3D")
         btn_open_drill.clicked.connect(self.open_drillhole_dialog)
         box_drill_layout.addWidget(btn_open_drill)
