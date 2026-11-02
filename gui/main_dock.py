@@ -95,12 +95,154 @@ class GeoCongoAIDockWidget(QDockWidget):
         self._init_ui()
         QTimer.singleShot(0, self._run_startup_diagnostic)
 
+    def _apply_modern_ui_theme(self):
+        """Applies a cleaner UI theme inspired by AI Agent while keeping QGIS light styling."""
+        self.setStyleSheet(
+            """
+            QDockWidget {
+                background: #f5f7f8;
+                color: #1f2937;
+                border: 1px solid #dfe7ee;
+            }
+            QWidget {
+                background: #f5f7f8;
+                color: #1f2937;
+            }
+            QTabWidget::pane {
+                border: 1px solid #dfe7ee;
+                border-radius: 10px;
+                background: #ffffff;
+            }
+            QTabBar::tab {
+                background: #edf2f7;
+                color: #374151;
+                border: 1px solid #dfe7ee;
+                border-bottom: none;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                padding: 7px 12px;
+                margin-right: 4px;
+            }
+            QTabBar::tab:selected {
+                background: #ffffff;
+                color: #0f766e;
+                border-color: #a7d7d3;
+                font-weight: 600;
+            }
+            QGroupBox {
+                border: 1px solid #dfe7ee;
+                border-radius: 10px;
+                margin-top: 10px;
+                padding-top: 10px;
+                background: #ffffff;
+                color: #1f2937;
+            }
+            QGroupBox:title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 6px;
+                color: #0f766e;
+                font-weight: 600;
+            }
+            QLabel {
+                color: #1f2937;
+            }
+            QPushButton {
+                border: 1px solid #bdd6d3;
+                border-radius: 8px;
+                background: #eef9f7;
+                color: #0f172a;
+                padding: 7px 12px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background: #e4f5f2;
+                border-color: #86c0ba;
+            }
+            QPushButton:pressed {
+                background: #d9f0ed;
+            }
+            QTextEdit, QPlainTextEdit {
+                border: 1px solid #dfe7ee;
+                border-radius: 10px;
+                background: #ffffff;
+                color: #1f2937;
+                padding: 8px;
+            }
+            QScrollBar:vertical {
+                background: #edf2f7;
+                width: 10px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical {
+                background: #a8b7c7;
+                border-radius: 5px;
+            }
+            """
+        )
+        self.txt_chat_history.setStyleSheet(
+            """
+            QTextEdit {
+                background: #f9fbfc;
+                border: 1px solid #dfe7ee;
+                border-radius: 12px;
+                padding: 12px;
+                color: #1f2937;
+            }
+            """
+        )
+        self.txt_chat_input.setStyleSheet(
+            """
+            QTextEdit {
+                background: #ffffff;
+                border: 1px solid #cfe1e7;
+                border-radius: 12px;
+                padding: 10px 12px;
+                color: #1f2937;
+            }
+            """
+        )
+        self.btn_send.setStyleSheet(
+            """
+            QPushButton {
+                background: #0f766e;
+                color: white;
+                border: none;
+                border-radius: 10px;
+                padding: 10px 16px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #0d6b66;
+            }
+            QPushButton:pressed {
+                background: #0b5e5a;
+            }
+            """
+        )
+        self.lbl_streaming_status.setStyleSheet(
+            "color: #0f766e; font-style: italic; background: transparent; padding: 4px 0;"
+        )
+        self.box_runtime_warning.setStyleSheet(
+            "QGroupBox {"
+            "border: 1px solid #f0b8a8;"
+            "border-radius: 8px;"
+            "margin-top: 8px;"
+            "padding-top: 10px;"
+            "background: #fff9f5;"
+            "}"
+            "QLabel { color: #7f1d1d; }"
+        )
+
     def _init_ui(self):
         main_widget = QWidget()
         layout = QVBoxLayout(main_widget)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
 
         # Title / Brand Header
         header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
         
         import os
         from qgis.PyQt.QtGui import QIcon, QPixmap
@@ -113,7 +255,7 @@ class GeoCongoAIDockWidget(QDockWidget):
             header_layout.addWidget(lbl_logo)
 
         lbl_title = QLabel("<b>GeoCongo AI</b>")
-        lbl_title.setStyleSheet("font-size: 14px; color: #1b5e20;")
+        lbl_title.setStyleSheet("font-size: 14px; color: #0f172a; font-weight: 700;")
         header_layout.addWidget(lbl_title)
         header_layout.addStretch()
 
@@ -126,10 +268,20 @@ class GeoCongoAIDockWidget(QDockWidget):
 
         # Tab Widget for Modules (Default tab: Mtumishi Agentic Assistant)
         self.tabs = QTabWidget()
+        self.tabs.setStyleSheet(
+            """
+            QTabWidget::pane {
+                border: none;
+                background: transparent;
+            }
+            """
+        )
 
         # Tab 1: 🤖 Mtumishi Agentic Chatbot
         tab_mtumishi = QWidget()
         layout_mtumishi = QVBoxLayout(tab_mtumishi)
+        layout_mtumishi.setContentsMargins(0, 0, 0, 0)
+        layout_mtumishi.setSpacing(8)
 
         box_mtumishi_desc = QGroupBox("🤖 Mtumishi - Assistant QGIS intelligent")
         box_mtumishi_desc_layout = QVBoxLayout(box_mtumishi_desc)
@@ -143,20 +295,10 @@ class GeoCongoAIDockWidget(QDockWidget):
 
         self.box_runtime_warning = QGroupBox("⚠️ Diagnostic runtime Mtumishi")
         self.box_runtime_warning.setVisible(False)
-        self.box_runtime_warning.setStyleSheet(
-            "QGroupBox {"
-            "border: 1px solid #ef9a9a;"
-            "border-radius: 6px;"
-            "margin-top: 8px;"
-            "padding-top: 10px;"
-            "background: #fff8f6;"
-            "}"
-        )
         runtime_warning_layout = QVBoxLayout(self.box_runtime_warning)
 
         self.lbl_runtime_warning = QLabel("")
         self.lbl_runtime_warning.setWordWrap(True)
-        self.lbl_runtime_warning.setStyleSheet("color: #7f1d1d;")
         runtime_warning_layout.addWidget(self.lbl_runtime_warning)
 
         runtime_btn_layout = QHBoxLayout()
@@ -187,11 +329,9 @@ class GeoCongoAIDockWidget(QDockWidget):
         layout_mtumishi.addWidget(self.txt_chat_history)
 
         self.lbl_streaming_status = QLabel("")
-        self.lbl_streaming_status.setStyleSheet("color: #455a64; font-style: italic; padding: 2px 4px;")
         self.lbl_streaming_status.setVisible(False)
         layout_mtumishi.addWidget(self.lbl_streaming_status)
 
-        # Chat input area
         chat_input_layout = QHBoxLayout()
         self.txt_chat_input = ChatInputTextEdit()
         self.txt_chat_input.setFixedHeight(72)
@@ -200,7 +340,6 @@ class GeoCongoAIDockWidget(QDockWidget):
         chat_input_layout.addWidget(self.txt_chat_input)
 
         self.btn_send = QPushButton("Envoyer")
-        self.btn_send.setStyleSheet("font-weight: bold; background-color: #2e7d32; color: white;")
         self.btn_send.clicked.connect(self.send_mtumishi_message)
         chat_input_layout.addWidget(self.btn_send)
 
@@ -218,7 +357,6 @@ class GeoCongoAIDockWidget(QDockWidget):
         box_pekua_layout.addWidget(lbl_pekua_desc)
 
         btn_open_pekua = QPushButton("Ouvrir la Boîte de Dialogue Pekua RAG")
-        btn_open_pekua.setStyleSheet("font-weight: bold; background-color: #1976d2; color: white; padding: 8px;")
         btn_open_pekua.clicked.connect(self.open_pekua_dialog)
         box_pekua_layout.addWidget(btn_open_pekua)
         layout_pekua.addWidget(box_pekua)
@@ -236,12 +374,10 @@ class GeoCongoAIDockWidget(QDockWidget):
         box_gundua_layout.addWidget(lbl_gundua_desc)
 
         btn_open_gundua = QPushButton("Lancer l'analyse Greenfield (BBOX Dynamique)")
-        btn_open_gundua.setStyleSheet("font-weight: bold; background-color: #2e7d32; color: white; padding: 8px;")
         btn_open_gundua.clicked.connect(self.open_gundua_dialog)
         box_gundua_layout.addWidget(btn_open_gundua)
         layout_gundua.addWidget(box_gundua)
 
-        # BBOX Dynamic Status Preview Box
         box_bbox = QGroupBox("📍 Emprise Carte Courante (WGS84)")
         box_bbox_layout = QVBoxLayout(box_bbox)
         self.lbl_bbox_preview = QLabel("Calcul de l'emprise...")
@@ -266,7 +402,6 @@ class GeoCongoAIDockWidget(QDockWidget):
         box_drill_layout.addWidget(lbl_drill_desc)
 
         btn_open_drill = QPushButton("Ouvrir l'analyseur Chimbua 3D")
-        btn_open_drill.setStyleSheet("font-weight: bold; background-color: #f57c00; color: white; padding: 8px;")
         btn_open_drill.clicked.connect(self.open_drillhole_dialog)
         box_drill_layout.addWidget(btn_open_drill)
         layout_drill.addWidget(box_drill)
@@ -275,6 +410,7 @@ class GeoCongoAIDockWidget(QDockWidget):
 
         layout.addWidget(self.tabs)
         self.setWidget(main_widget)
+        self._apply_modern_ui_theme()
 
         # Update initial bbox preview
         self.update_bbox_preview()
