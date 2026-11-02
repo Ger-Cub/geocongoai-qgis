@@ -8,6 +8,8 @@ from qgis.PyQt.QtWidgets import QAction, QMessageBox
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
 
+from .app.bootstrap import safe_startup
+from .app.plugin import GeoCongoAIModularPlugin
 from .gui.main_dock import GeoCongoAIDockWidget
 from .gui.gundua_dialog import GunduaEngineDialog
 from .gui.drillhole_dialog import DrillholeAnalysisDialog
@@ -24,6 +26,8 @@ class GeoCongoAI:
         self.iface = iface
         self.dock_widget = None
         self.menu = None
+        self.modular_plugin = GeoCongoAIModularPlugin(iface)
+        self.bootstrap_status = safe_startup(iface)
 
         # Actions
         self.action_pekua = None
@@ -37,6 +41,9 @@ class GeoCongoAI:
         plugin_dir = os.path.dirname(__file__)
         icon_path = os.path.join(plugin_dir, "icon.png")
         icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+
+        # Initialize the modular plugin
+        self.modular_plugin.initialize()
 
         # 1. Create Actions
         self.action_pekua = QAction(
